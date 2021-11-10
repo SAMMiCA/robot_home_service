@@ -4,7 +4,8 @@ from typing import List, Dict, Set, Optional, Any
 
 from ai2thor.controller import Controller
 
-from datagen.datagen_constants import OBJECT_TYPES_THAT_CAN_HAVE_IDENTICAL_MESHES
+# from datagen.datagen_constants import OBJECT_TYPES_THAT_CAN_HAVE_IDENTICAL_MESHES
+from env.constants import SCENE_TYPE_TO_SCENES
 
 
 def get_scenes(stage: str) -> List[str]:
@@ -110,25 +111,35 @@ def get_object_ids_to_not_move_from_object_types(
     ]
 
 
-def remove_objects_until_all_have_identical_meshes(controller: Controller):
-    obj_type_to_obj_list = defaultdict(lambda: [])
-    for obj in controller.last_event.metadata["objects"]:
-        obj_type_to_obj_list[obj["objectType"]].append(obj)
+# def remove_objects_until_all_have_identical_meshes(controller: Controller):
+#     obj_type_to_obj_list = defaultdict(lambda: [])
+#     for obj in controller.last_event.metadata["objects"]:
+#         obj_type_to_obj_list[obj["objectType"]].append(obj)
 
-    for obj_type in OBJECT_TYPES_THAT_CAN_HAVE_IDENTICAL_MESHES:
-        objs_of_type = list(
-            sorted(obj_type_to_obj_list[obj_type], key=lambda x: x["name"])
-        )
-        random.shuffle(objs_of_type)
-        objs_to_remove = objs_of_type[:-1]
-        for obj_to_remove in objs_to_remove:
-            obj_to_remove_name = obj_to_remove["name"]
-            obj_id_to_remove = next(
-                obj["objectId"]
-                for obj in controller.last_event.metadata["objects"]
-                if obj["name"] == obj_to_remove_name
-            )
-            controller.step("RemoveFromScene", objectId=obj_id_to_remove)
-            if not controller.last_event.metadata["lastActionSuccess"]:
-                return False
-    return True
+#     for obj_type in OBJECT_TYPES_THAT_CAN_HAVE_IDENTICAL_MESHES:
+#         objs_of_type = list(
+#             sorted(obj_type_to_obj_list[obj_type], key=lambda x: x["name"])
+#         )
+#         random.shuffle(objs_of_type)
+#         objs_to_remove = objs_of_type[:-1]
+#         for obj_to_remove in objs_to_remove:
+#             obj_to_remove_name = obj_to_remove["name"]
+#             obj_id_to_remove = next(
+#                 obj["objectId"]
+#                 for obj in controller.last_event.metadata["objects"]
+#                 if obj["name"] == obj_to_remove_name
+#             )
+#             controller.step("RemoveFromScene", objectId=obj_id_to_remove)
+#             if not controller.last_event.metadata["lastActionSuccess"]:
+#                 return False
+#     return True
+
+def find_object_by_type(objects: List[Dict], object_type: str):
+    return [
+        obj
+        for obj in objects
+        if obj["objectType"] == object_type
+    ]
+
+def scene_from_type_idx(scene_type: str, scene_idx: int):
+    return SCENE_TYPE_TO_SCENES[scene_type][scene_idx - 1]

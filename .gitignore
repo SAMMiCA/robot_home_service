@@ -152,3 +152,4 @@ scene_graph/weights/
 scene_graph/data/coco/
 scene_graph/external/DCNv2
 scene_graph/orb_setting/ORBvoc.txt
+sEDM/

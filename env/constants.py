@@ -9,7 +9,9 @@ REQUIRED_THOR_VERSION = "2.7.2"
 STARTER_REARRANGE_DATA_DIR = os.path.join(
     os.path.abspath(os.path.dirname(Path(__file__))), "../data/rearrange"
 )
-
+STARTER_HOME_SERVICE_DATA_DIR = os.path.join(
+    os.path.abspath(os.path.dirname(Path(__file__))), "../data/home_service"
+)
 STARTER_HOME_SERVICE_SIMPLE_PICK_AND_PLACE_DATA_DIR = os.path.join(
     os.path.abspath(os.path.dirname(Path(__file__))), "../data/home_service/simple_pick_and_place"
 )
@@ -19,6 +21,24 @@ STEP_SIZE = 0.25
 ROTATION_ANGLE = 90
 HORIZON_ANGLE = 30
 SMOOTHING_FACTOR = 1
+
+KITCHENS = [f"FloorPlan{i}" for i in range(1, 31)]
+LIVING_ROOMS = [f"FloorPlan{200 + i}" for i in range(1, 31)]
+BEDROOMS = [f"FloorPlan{300 + i}" for i in range(1, 31)]
+BATHROOMS = [f"FloorPlan{400 + i}" for i in range(1, 31)]
+
+SCENE_TYPE_TO_SCENES = {
+    "Kitchen": KITCHENS,
+    "LivingRoom": LIVING_ROOMS,
+    "Bedroom": BEDROOMS,
+    "Bathroom": BATHROOMS,
+}
+
+SCENE_TO_SCENE_TYPE = {
+    scene: scene_type
+    for scene_type, scenes in SCENE_TYPE_TO_SCENES.items()
+    for scene in scenes
+}
 
 # fmt: off
 REARRANGE_SIM_OBJECTS = [

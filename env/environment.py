@@ -22,18 +22,20 @@ from allenact_plugins.ithor_plugin.ithor_util import (
     round_to_factor,
     include_object_data,
 )
-from datagen.datagen_constants import OBJECT_TYPES_TO_NOT_MOVE
+# from datagen.datagen_constants import OBJECT_TYPES_TO_NOT_MOVE
 from datagen.datagen_utils import (
     open_objs,
     get_object_ids_to_not_move_from_object_types,
-    remove_objects_until_all_have_identical_meshes,
+    # remove_objects_until_all_have_identical_meshes,
+    scene_from_type_idx,
 )
 from env.constants import (
     REQUIRED_THOR_VERSION,
     MAX_HAND_METERS,
     PICKUPABLE_OBJECTS,
     OPENABLE_OBJECTS,
-    RECEPTACLE_OBJECTS
+    RECEPTACLE_OBJECTS,
+    SCENE_TO_SCENE_TYPE
 )
 from env.utils import (
     BoundedFloat,
@@ -61,25 +63,27 @@ class HomeServiceTaskSpec:
 
     def __init__(
         self,
-        scene: str,
+        scene_index: int,
+        start_scene: str,
+        target_scene: str,
         stage: Optional[str] = None,
-        agent_position: Optional[Dict[str, float]] = None,
-        agent_rotation: Optional[float] = None,
-        openable_data: Optional[Sequence[Dict[str, Any]]] = None,
+        agent_positions: Optional[Dict[str, Dict[str, float]]] = None,
+        agent_rotations: Optional[Dict[str, float]] = None,
         starting_poses: Optional[Sequence[Dict[str, Any]]] = None,
-        target_poses: Optional[Sequence[Dict[str, Any]]] = None,
+        objs_to_open: Optional[Sequence[Dict[str, Any]]] = None,
         runtime_sample: bool = False,
         runtime_data: Optional[Dict[str, Any]] = None,
         **metrics,
     ):
         """HomeServiceTaskSpec"""
-        self.scene = scene
+        self.scene_index = scene_index
+        self.start_scene = start_scene
+        self.target_scene = target_scene
         self.stage = stage
-        self.agent_position = agent_position
-        self.agent_rotation = agent_rotation
-        self.openable_data = openable_data
+        self.agent_positions = agent_positions
+        self.agent_rotations = agent_rotations
         self.starting_poses = starting_poses
-        self.target_poses = target_poses
+        self.objs_to_open = objs_to_open
         self.runtime_sample = runtime_sample
         self.runtime_data: Dict[str, Any] = (
             runtime_data if runtime_data is not None else {}
@@ -96,44 +100,33 @@ class HomeServiceTaskSpec:
         if self.runtime_sample:
             raise NotImplementedError("Cannot create a unique id for a runtime sample.")
 
-        return f"{self.scene}__{self.stage}__{self.metrics['index']}"
+        return f"{self.stage}__{self.start_scene}__{self.target_scene}"
 
 
-class HomeServiceSimplePickAndPlaceTaskSpec(HomeServiceTaskSpec):
+class HomeServiceSimpleTaskOrderTaskSpec(HomeServiceTaskSpec):
     def __init__(
         self,
-        task_type: Optional[str] = None,
+        pickup_object: str,
+        start_receptacle: str,
+        place_receptacle: str,
         **spec_kwargs,
     ):
         super().__init__(**spec_kwargs)
-        self._pickup_target = None
-        self._place_target = None
+        self.pickup_object = pickup_object
+        self.start_receptacle = start_receptacle
+        self.place_receptacle = place_receptacle
 
     @property
     def unique_id(self):
-        return f"{super().unique_id}__{self.task_type}" if self.task_type is not None else super().unique_id
-
-    @property
-    def pickup_target(self):
-        return self._pickup_target
-
-    @pickup_target.setter
-    def pickup_target(self, obj):
-        self._pickup_target = obj
-
-    @property
-    def place_target(self):
-        return self._place_target
-
-    @place_target.setter
-    def place_target(self, obj):
-        self._place_target = obj
+        return f"{super().unique_id}__{self.pickup_object}__{self.start_receptacle}__{self.place_receptacle}"
 
     @property
     def task_type(self):
-        if self.pickup_target is not None and self.place_target is not None:
-            return f"Pick_{self.pickup_target['objectType']}_And_Place_{self.place_target['objectType']}"
-        return None
+        return (
+            f"Pick_{self.pickup_object}_And_Place_{self.place_receptacle}"
+            if self.place_receptacle != "User" else
+            f"Bring_Me_{self.pickup_object}"
+        )
 
 
 class HomeServiceTHOREnvironment:
@@ -618,191 +611,6 @@ class HomeServiceTHOREnvironment:
             },
         )
 
-    # def drop_held_object_with_snap(self) -> bool:
-
-    #     if not self.mode == HomeServiceMode.SNAP:
-    #         raise Exception("Must be in HomeServiceMode.SNAP mode")
-
-    #     DEC = 2
-
-    #     with include_object_data(self.controller):
-    #         event = self.controller.last_event
-    #         held_obj = self.held_object
-
-    #         if held_obj is None:
-    #             return False
-
-    #         self.controller.step(
-    #             "MakeObjectBreakable", objectId=self.held_object["objectId"]
-    #         )
-    #     return execute_action(
-    #         controller=self.controller,
-    #         action_space=self.action_space,
-    #         action_fn=self.,
-    #         thor_action="",
-    #         default_thor_kwargs=self.physics_step_kwargs,
-    #     )
-
-    # @staticmethod
-    # def compare_poses(
-    #     goal_pose: Union[Dict[str, Any], Sequence[Dict[str, Any]]],
-    #     cur_pose: Union[Dict[str, Any], Sequence[Dict[str, Any]]],
-    # ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
-
-    #     if isinstance(goal_pose, Sequence):
-    #         assert isinstance(cur_pose, Sequence)
-    #         return [
-    #             HomeServiceTHOREnvironment.compare_poses(goal_pose=gp, cur_pose=cp)
-    #             for gp, cp in zip(goal_pose, cur_pose)
-    #         ]
-
-    #     assert goal_pose["type"] == cur_pose["type"]
-    #     assert not goal_pose["broken"]
-
-    #     if cur_pose["broken"]:
-    #         return {
-    #             "broken": True,
-    #             "iou": None,
-    #             "openness_diff": None,
-    #             "position_dist": None,
-    #             "rotation_dist": None,
-    #         }
-
-    #     if goal_pose["bounding_box"] is None and cur_pose["bounding_box"] is None:
-    #         iou = None
-    #         position_dist = None
-    #         rotation_dist = None
-    #     else:
-    #         position_dist = IThorEnvironment.position_dist(
-    #             goal_pose["position"], cur_pose["position"]
-    #         )
-    #         rotation_dist = IThorEnvironment.angle_between_rotations(
-    #             goal_pose["rotation"], cur_pose["rotation"]
-    #         )
-    #         if position_dist < 1e-2 and rotation_dist < 10.0:
-    #             iou = 1.0
-    #         else:
-    #             try:
-    #                 iou = iou_box_3d(
-    #                     goal_pose["bounding_box"], cur_pose["bounding_box"]
-    #                 )
-    #             except Exception as _:
-    #                 get_logger().warning(
-    #                     "Could not compute IOU, will assume it was 0. Error during IOU computation:"
-    #                     f"\n{traceback.format_exc()}"
-    #                 )
-    #                 iou = 0
-
-    #     if goal_pose["openness"] is None and cur_pose["openness"] is None:
-    #         openness_diff = None
-    #     else:
-    #         openness_diff = abs(goal_pose["openness"] - cur_pose["openness"])
-
-    #     return {
-    #         "broken": False,
-    #         "iou": iou,
-    #         "openness_diff": openness_diff,
-    #         "position_dist": position_dist,
-    #         "rotation_dist": rotation_dist,
-    #     }
-    
-    # @classmethod
-    # def pose_difference_energy(
-    #     cls,
-    #     goal_pose: Union[Dict[str, Any], Sequence[Dict[str, Any]]],
-    #     cur_pose: Union[Dict[str, Any], Sequence[Dict[str, Any]]],
-    #     min_iou: float = 0.5,
-    #     open_tol: float = 0.2,
-    #     pos_barrier: float = 2.0,
-    # ) -> Union[float, np.ndarray]:
-    #     if isinstance(goal_pose, Sequence):
-    #         assert isinstance(cur_pose, Sequence)
-    #         return np.array(
-    #             [
-    #                 cls.pose_difference_energy(
-    #                     goal_pose=p0,
-    #                     cur_pose=p1,
-    #                     min_iou=min_iou,
-    #                     open_tol=open_tol,
-    #                     pos_barrier=pos_barrier,
-    #                 )
-    #                 for p0, p1 in zip(goal_pose, cur_pose)
-    #             ]
-    #         )
-    #     assert not goal_pose["broken"]
-
-    #     pose_diff = cls.compare_poses(goal_pose=goal_pose, cur_pose=cur_pose)
-    #     if pose_diff["broken"]:
-    #         return 1.0
-
-    #     if pose_diff["openness_diff"] is None:
-    #         gbb = np.array(goal_pose["bounding_box"])
-    #         cbb = np.array(cur_pose["bounding_box"])
-
-    #         iou = pose_diff["iou"]
-    #         iou_energy = max(1 - iou / min_iou, 0)
-
-    #         if iou > 0:
-    #             position_dist_energy = 0.0
-    #         else:
-    #             min_pairwise_dist_between_corners = np.sqrt(
-    #                 (
-    #                     (
-    #                         np.tile(gbb, (1, 8)).reshape(-1, 3)
-    #                         - np.tile(cbb, (8, 1)).reshape(-1, 3)
-    #                     )
-    #                     ** 2
-    #                 ).sum(1)
-    #             ).min()
-    #             position_dist_energy = min(
-    #                 min_pairwise_dist_between_corners / pos_barrier, 1.0
-    #             )
-
-    #         return 0.5 * iou_energy + 0.5 * position_dist_energy
-
-    #     else:
-    #         return 1.0 * (pose_diff["openness_diff"] > open_tol)
-
-    # @classmethod
-    # def are_poses_equal(
-    #     cls,
-    #     goal_pose: Union[Dict[str, Any], Sequence[Dict[str, Any]]],
-    #     cur_pose: Union[Dict[str, Any], Sequence[Dict[str, Any]]],
-    #     min_iou: float = 0.5,
-    #     open_tol: float = 0.2,
-    #     treat_broken_as_unequal: bool = False,
-    # ) -> Union[bool, np.ndarray]:
-    #     if isinstance(goal_pose, Sequence):
-    #         assert isinstance(cur_pose, Sequence)
-    #         return np.array(
-    #             [
-    #                 cls.are_poses_equal(
-    #                     goal_pose=p0,
-    #                     cur_pose=p1,
-    #                     min_iou=min_iou,
-    #                     open_tol=open_tol,
-    #                     treat_broken_as_unequal=treat_broken_as_unequal,
-    #                 )
-    #                 for p0, p1 in zip(goal_pose, cur_pose)
-    #             ]
-    #         )
-    #     assert not goal_pose["broken"]
-
-    #     if cur_pose["broken"]:
-    #         if treat_broken_as_unequal:
-    #             return False
-    #         else:
-    #             raise RuntimeError(
-    #                 f"Cannot determine if poses of two objects are"
-    #                 f" equal if one is broken object ({goal_pose} v.s. {cur_pose})."
-    #             )
-
-    #     pose_diff = cls.compare_poses(goal_pose=goal_pose, cur_pose=cur_pose)
-
-    #     return (pose_diff["iou"] is None or pose_diff["iou"] > min_iou) and (
-    #         pose_diff["openness_diff"] is None or pose_diff["openness_diff"] <= open_tol
-    #     )
-
     @property
     def all_rearranged(self) -> bool:
         pass
@@ -811,6 +619,14 @@ class HomeServiceTHOREnvironment:
     def poses(
         self,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+        # with include_object_data(self.controller):
+        #     obj_name_to_current_obj = self._obj_list_to_obj_name_to_pose_dict(
+        #         self.controller.last_event.metadata["objects"]
+        #     )
+        # ordered_obj_names = list(self.object_name_to_start_pose.keys())
+
+        # current_objs_list = []
+        # for obj_name in ordered_obj_names:
         pass
 
     def _runtime_reset(
@@ -830,7 +646,7 @@ class HomeServiceTHOREnvironment:
             if self._enhanced_physics_determinism:
                 self.controller.step("PausePhysicsAutoSim")
 
-            remove_objects_until_all_have_identical_meshes(self.controller)
+            # remove_objects_until_all_have_identical_meshes(self.controller)
             self.controller.step(
                 "InitialRandomSpawn", forceVisible=True, placeStationary=True,
             )
@@ -875,24 +691,30 @@ class HomeServiceTHOREnvironment:
             self.current_task_spec.runtime_data["starting_objects"] = md["objects"]
 
     def _task_spec_reset(
-        self, task_spec: HomeServiceTaskSpec, force_axis_aligned_start: bool
+        self, task_spec: HomeServiceTaskSpec, force_axis_aligned_start: bool, scene_type: Optional[str] = None,
     ):
         assert (
             not task_spec.runtime_sample
         ), "`_task_spec_reset` requires that `task_spec.runtime_sample` is `False`."
 
         self.current_task_spec = task_spec
-        self.controller.reset(self.current_task_spec.scene)
+        if scene_type is None:
+            reset_scene = self.current_task_spec.start_scene
+            scene_type = SCENE_TO_SCENE_TYPE[reset_scene]
+        else:
+            reset_scene = scene_from_type_idx(scene_type, self.current_task_spec.scene_index)
+
+        self.controller.reset(reset_scene)
         if self._enhanced_physics_determinism:
             self.controller.step("PausePhysicsAutoSim")
 
         if force_axis_aligned_start:
-            self.current_task_spec.agent_rotation = round_to_factor(
-                self.current_task_spec.agent_rotation, 90
+            self.current_task_spec.agent_rotations[scene_type] = round_to_factor(
+                self.current_task_spec.agent_rotations[scene_type], 90
             )
 
-        pos = self.current_task_spec.agent_position
-        rot = {"x": 0, "y": self.current_task_spec.agent_rotation, "z": 0}
+        pos = self.current_task_spec.agent_positions[scene_type]
+        rot = {"x": 0, "y": self.current_task_spec.agent_rotations[scene_type], "z": 0}
         self.controller.step(
             "TeleportFull",
             **pos,
@@ -902,32 +724,33 @@ class HomeServiceTHOREnvironment:
             forceAction=True,
         )
 
-        with include_object_data(self.controller):
-            for obj in self.current_task_spec.openable_data:
-                current_obj_info = next(
-                    l_obj
-                    for l_obj in self.last_event.metadata["objects"]
-                    if l_obj["name"] == obj["name"]
-                )
+        if reset_scene == self.current_task_spec.target_scene:
+            with include_object_data(self.controller):
+                for obj in self.current_task_spec.objs_to_open:
+                    current_obj_info = next(
+                        l_obj
+                        for l_obj in self.last_event.metadata["objects"]
+                        if l_obj["name"] == obj["name"]
+                    )
+                    self.controller.step(
+                        action="OpenObject",
+                        objectId=current_obj_info["objectId"],
+                        openness=1,
+                        forceAction=True,
+                        **self.physics_step_kwargs,
+                    )
+                
                 self.controller.step(
-                    action="OpenObject",
-                    objectId=current_obj_info["objectId"],
-                    openness=obj["target_openness"],
-                    forceAction=True,
-                    **self.physics_step_kwargs,
+                    "SetObjectPoses",
+                    objectPoses=self.current_task_spec.starting_poses,
+                    forceKinematic=False,
+                    enablePhysicsJitter=True,
+                    forceRigidbodySleep=True,
                 )
-            
-            self.controller.step(
-                "SetObjectPoses",
-                objectPoses=self.current_task_spec.target_poses,
-                forceKinematic=False,
-                enablePhysicsJitter=True,
-                forceRigidbodySleep=True,
-            )
-            assert self.controller.last_event.metadata["lastActionSuccess"]
+                assert self.controller.last_event.metadata["lastActionSuccess"]
 
     def reset(
-        self, task_spec: HomeServiceTaskSpec, force_axis_aligned_start: bool = False,
+        self, task_spec: HomeServiceTaskSpec, force_axis_aligned_start: bool = False, scene_type: str = None,
     ) -> None:
         if task_spec.runtime_sample:
             self._runtime_reset(
@@ -935,7 +758,7 @@ class HomeServiceTHOREnvironment:
             )
         else:
             self._task_spec_reset(
-                task_spec=task_spec, force_axis_aligned_start=force_axis_aligned_start
+                task_spec=task_spec, force_axis_aligned_start=force_axis_aligned_start, scene_type=scene_type,
             )
         
         self.object_name_to_start_pose = self._obj_list_to_obj_name_to_pose_dict(

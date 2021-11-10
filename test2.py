@@ -6,7 +6,7 @@ import json
 from ai2thor.controller import Controller
 from allenact_plugins.ithor_plugin.ithor_util import include_object_data
 
-start_room = "FloorPlan401"
+start_room = "FloorPlan2"
 # c = Controller(quality="Ultra", local_executable_path="unity/robot_home_service.x86_64", scene=start_room)
 # with open("/media/yhkim/HDD/ALFRED_Dataset/json_2.1.0/train/pick_and_place_simple-Box-None-Dresser-224/trial_T20190907_163906_753897/traj_data.json", "r") as f:
 #     data = json.load(f)
