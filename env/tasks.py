@@ -33,6 +33,7 @@ from env.utils import (
     sample_pick_and_place_target,
 )
 
+from ..sEDM.test_edm import sEDM_model
 
 class HomeServiceTaskType(enum.Enum):
 
