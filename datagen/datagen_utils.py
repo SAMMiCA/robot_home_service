@@ -3,8 +3,8 @@ from collections import defaultdict
 from typing import List, Dict, Set, Optional, Any
 
 from ai2thor.controller import Controller
+from datagen.datagen_constants import OBJECTS_FOR_TEST, TASK_ORDERS
 
-# from datagen.datagen_constants import OBJECT_TYPES_THAT_CAN_HAVE_IDENTICAL_MESHES
 from env.constants import SCENE_TYPE_TO_SCENES
 
 
@@ -49,32 +49,31 @@ def filter_pickupable(
 def get_random_seeds(max_seed: int = int(1e8)) -> Dict[str, int]:
     # Generate random seeds for each stage
 
-    # Train seed
+    # Train seen seed
     random.seed(1329328939)
-    train_seed = random.randint(0, max_seed - 1)
+    train_seen_seed = random.randint(0, max_seed - 1)
 
     # Train unseen seed
     random.seed(709384928)
     train_unseen_seed = random.randint(0, max_seed - 1)
 
-    # val seed
+    # Test seen seed
     random.seed(3348958620)
-    val_seed = random.randint(0, max_seed - 1)
+    test_seen_seed = random.randint(0, max_seed - 1)
 
-    # test seed
+    # Test unseen seed
     random.seed(289123396)
-    test_seed = random.randint(0, max_seed - 1)
+    test_unseen_seed = random.randint(0, max_seed - 1)
 
     # Debug seed
     random.seed(239084231)
     debug_seed = random.randint(0, max_seed - 1)
 
     return {
-        "train": train_seed,
+        "train_seen": train_seen_seed,
         "train_unseen": train_unseen_seed,
-        "val": val_seed,
-        "valid": val_seed,
-        "test": test_seed,
+        "test_seen": test_seen_seed,
+        "test_unseen": test_unseen_seed,
         "debug": debug_seed,
     }
 
@@ -143,3 +142,39 @@ def find_object_by_type(objects: List[Dict], object_type: str):
 
 def scene_from_type_idx(scene_type: str, scene_idx: int):
     return SCENE_TYPE_TO_SCENES[scene_type][scene_idx - 1]
+
+def get_task_keys(stage: str) -> List[str]:
+    assert stage in {"train_seen", "train_unseen", "test_seen", "test_unseen", "all"}
+    stage = stage.split("_")[0]
+
+    task_keys = []
+    for task_order in TASK_ORDERS:
+        pickup_object_types = task_order["pickupObjectTypes"]
+        for pickup_object_type in pickup_object_types:
+            task_key = (
+                f'Pick_{pickup_object_type}_On_{task_order["startReceptacleType"]}_And_Place_{task_order["targetReceptacleType"]}'
+                if task_order["targetReceptacleType"] != "User" else
+                f'Bring_Me_{pickup_object_type}_On_{task_order["startReceptacleType"]}'
+            )
+            if stage == "test" and pickup_object_type in OBJECTS_FOR_TEST:
+                task_keys.append(task_key)
+            elif stage == "train" and pickup_object_type not in OBJECTS_FOR_TEST:
+                task_keys.append(task_key)
+            elif stage == "all":
+                task_keys.append(task_key)
+            
+    return task_keys
+
+def get_scene_inds(stage: str, seen: bool = None) -> List[int]:
+    assert stage in {"train", "test", "train_seen", "train_unseen", "test_seen", "test_unseen", "all"}
+    if stage in {"train", "test"}:
+        assert seen is not None
+    elif stage == "all":
+        return range(1, 31)
+    else:
+        seen = True if stage.split("_")[-1] == "seen" else False
+    
+    if seen:
+        return range(1, 21)
+    else:
+        return range(21, 31)

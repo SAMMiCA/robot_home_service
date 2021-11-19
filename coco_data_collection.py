@@ -97,7 +97,7 @@ if __name__ == "__main__":
         quality="Ultra",
     )
     task_sampler_params = HomeServiceBaseExperimentConfig.stagewise_task_sampler_args(
-        stage="combined", process_ind=0, total_processes=1, headless=False, allowed_inds_subset=tuple(range(1)),
+        stage="combined", process_ind=0, total_processes=1, headless=False, allowed_inds_subset=tuple(range(10)),
     )
     # task_sampler_params['discrete_actions'] = ACTIONS
     # task_sampler_params['allowed_scenes'] = ['FloorPlan1']
@@ -124,9 +124,9 @@ if __name__ == "__main__":
     for iter in range(task_sampler.total_unique):
         print(f'Collection progress... [{iter + 1}/{task_sampler.total_unique}]')
         idx = int(task_sampler.current_task_spec.unique_id.split('__')[2])
-        if idx < 3:
+        if idx % 5 < 3:
             path_idx = 0
-        elif idx == 3:
+        elif idx % 5 == 3:
             path_idx = 1
         else:
             path_idx = 2

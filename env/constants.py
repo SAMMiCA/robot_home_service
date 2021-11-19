@@ -40,6 +40,13 @@ SCENE_TO_SCENE_TYPE = {
     for scene in scenes
 }
 
+SCENE_TYPE_TO_LABEL = {
+    "Kitchen": 1,
+    "LivingRoom": 2,
+    "Bedroom": 3,
+    "Bathroom": 4,
+}
+
 # fmt: off
 REARRANGE_SIM_OBJECTS = [
     # A

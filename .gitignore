@@ -153,3 +153,6 @@ scene_graph/data/coco/
 scene_graph/external/DCNv2
 scene_graph/orb_setting/ORBvoc.txt
 sEDM/
+data_detector
+data/home_service/5_1
+data/home_service/old

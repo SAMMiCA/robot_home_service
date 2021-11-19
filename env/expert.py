@@ -26,10 +26,11 @@ from allenact_plugins.ithor_plugin.ithor_util import (
     round_to_factor,
     include_object_data,
 )
-from env.constants import NOT_PROPER_RECEPTACLES, STEP_SIZE
+from env.constants import NOT_PROPER_RECEPTACLES, SCENE_TO_SCENE_TYPE, STEP_SIZE
 from env.environment import (
     HomeServiceTHOREnvironment,
     HomeServiceMode,
+    HomeServiceTaskSpec,
 )
 from env.utils import filter_positions
 
@@ -37,6 +38,26 @@ if TYPE_CHECKING:
     from env.tasks import HomeServiceSimplePickAndPlaceTask, HomeServiceBaseTask
 
 AgentLocKeyType = Tuple[float, float, int, int]
+
+
+# class ExplorerTHOR:
+#     def __init__(
+#         self,
+#         task_spec: HomeServiceTaskSpec,
+#     ):
+#         self.current_task_spec = task_spec
+
+#     @property
+#     def goto_actions(self) -> Sequence[str]:
+#         goto_actions = []
+#         target_scene_type = SCENE_TO_SCENE_TYPE[self.current_task_spec.target_scene]
+#         goto_actions.append(f"Goto{target_scene_type}")
+#         for _ in range(4):
+#             goto_actions.append(f"RotateRight")
+        
+#         return goto_actions
+
+    
 
 
 class ShortestPathNavigatorTHOR:
@@ -825,6 +846,7 @@ class SubTaskExpert:
         assert self.task.num_steps_taken() == 0
 
         self.expert_action_list: List[int] = []
+        self.goto_action_list: List[str] = []
 
         self._last_to_interact_object_pose: Optional[Dict[str, Any]] = None
         self.map_oracle = True
@@ -836,6 +858,14 @@ class SubTaskExpert:
     def expert_action(self) -> int:
         assert self.task.num_steps_taken() == len(self.expert_action_list) - 1
         return self.expert_action_list[-1]
+
+    @property
+    def goto_action(self) -> str:
+        if len(self.goto_action_list) > 0:
+            return self.goto_action_list.pop()
+
+        else:
+            return None
 
     def update(
         self,
@@ -1007,24 +1037,9 @@ class SubTaskExpert:
         agent_loc = env.get_agent_location()
         held_object = env.held_object
 
-        with include_object_data(env.controller):
-            current_objects = env.last_event.metadata["objects"]
-
-            if subtask_target is not None:
-                if not isinstance(subtask_target, str):
-                    subtask_target = subtask_target['objectType']
-                target_obj = next(
-                    (o for o in current_objects if o['objectType'] == subtask_target), None
-                )
-            if subtask_place is not None:
-                if not isinstance(subtask_place, str):
-                    subtask_place = subtask_place['objectType']
-                place_obj = next(
-                    (o for o in current_objects if o['objectType'] == subtask_place), None
-                )
-
         # subtask action
         #   - "Done" : target = None, place = None
+        #   - "Goto" : place = None
         #   - "Scan" : target = None, place = None
         #   - "Navigate" : place = None
         #   - "Pickup" : place = None
@@ -1035,15 +1050,28 @@ class SubTaskExpert:
         if subtask_action == "Done":
             return dict(action="Done")
 
+        elif subtask_action == "Goto":
+            return dict(action="Goto", sceneType=subtask_target)
+
         elif subtask_action == "Scan":
             pass
 
         elif subtask_action == "Navigate":
+            with include_object_data(env.controller):
+                current_objects = env.last_event.metadata["objects"]
+
+                if subtask_target is not None:
+                    if not isinstance(subtask_target, str):
+                        subtask_target = subtask_target['objectType']
+                    target_obj = next(
+                        (o for o in current_objects if o['objectType'] == subtask_target), None
+                    )
             assert target_obj is not None
             self._last_to_interact_object_pose = target_obj
             expert_nav_action = self._expert_nav_action_to_obj(
                 obj=target_obj
             )
+
             if expert_nav_action is None:
                 interactable_positions = self._get_interactable_positions(obj=target_obj)
                 if len(interactable_positions) != 0:
@@ -1068,17 +1096,50 @@ class SubTaskExpert:
                 return dict(action=expert_nav_action)
 
         elif subtask_action == "Pickup":
+            with include_object_data(env.controller):
+                current_objects = env.last_event.metadata["objects"]
+
+                if subtask_target is not None:
+                    if not isinstance(subtask_target, str):
+                        subtask_target = subtask_target['objectType']
+                    target_obj = next(
+                        (o for o in current_objects if o['objectType'] == subtask_target), None
+                    )
             assert target_obj is not None and target_obj['visible']
             self._last_to_interact_object_pose = target_obj
             return dict(action="Pickup", objectType=target_obj["objectType"])
 
         elif subtask_action == "Put":
+            with include_object_data(env.controller):
+                current_objects = env.last_event.metadata["objects"]
+
+                if subtask_target is not None:
+                    if not isinstance(subtask_target, str):
+                        subtask_target = subtask_target['objectType']
+                    target_obj = next(
+                        (o for o in current_objects if o['objectType'] == subtask_target), None
+                    )
+                if subtask_place is not None:
+                    if not isinstance(subtask_place, str):
+                        subtask_place = subtask_place['objectType']
+                    place_obj = next(
+                        (o for o in current_objects if o['objectType'] == subtask_place), None
+                    )
             assert target_obj is not None and held_object["objectId"] == target_obj["objectId"]
             assert place_obj is not None and place_obj["visible"]
             self._last_to_interact_object_pose = place_obj
             return dict(action="PutByType", objectType=place_obj["objectType"])
             
         elif subtask_action in ["Open", "Close"]:
+            with include_object_data(env.controller):
+                current_objects = env.last_event.metadata["objects"]
+
+                if subtask_target is not None:
+                    if not isinstance(subtask_target, str):
+                        subtask_target = subtask_target['objectType']
+                    target_obj = next(
+                        (o for o in current_objects if o['objectType'] == subtask_target), None
+                    )
             assert target_obj is not None and target_obj['visible']
             self._last_to_interact_object_pose = target_obj
             return dict(action=f"{subtask_action}ByType", objectType=target_obj["objectType"])

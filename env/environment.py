@@ -330,6 +330,10 @@ class HomeServiceTHOREnvironment:
                     "z": BoundedFloat(low=-0.5, high=0.5),
                 },
                 self.drop_held_object: {},
+                self.goto_kitchen: {},
+                self.goto_living_room: {},
+                self.goto_bedroom: {},
+                self.goto_bathroom: {},
             }
         )
 
@@ -610,6 +614,18 @@ class HomeServiceTHOREnvironment:
                 **self.physics_step_kwargs,
             },
         )
+
+    def goto_kitchen(self) -> bool:
+        pass
+
+    def goto_living_room(self) -> bool:
+        pass
+
+    def goto_bedroom(self) -> bool:
+        pass
+
+    def goto_bathroom(self) -> bool:
+        pass
 
     @property
     def all_rearranged(self) -> bool:

@@ -9,6 +9,7 @@ import numpy as np
 
 from allenact_plugins.ithor_plugin.ithor_environment import IThorEnvironment
 from allenact_plugins.ithor_plugin.ithor_util import include_object_data
+from datagen.datagen_utils import scene_from_type_idx
 
 from env.constants import DEFAULT_COMPATIBLE_RECEPTACLES, MAX_HAND_METERS, ROTATION_ANGLE, STEP_SIZE, NOT_PROPER_RECEPTACLES
 

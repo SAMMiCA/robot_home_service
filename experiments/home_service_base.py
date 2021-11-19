@@ -46,9 +46,10 @@ from env.tasks import HomeServiceTaskSampler, HomeServiceTaskType
 class HomeServiceBaseExperimentConfig(ExperimentConfig):
 
     # Task parameters
-    MAX_STEPS = 250
+    MAX_STEPS = 500
     REQUIRE_DONE_ACTION = True
     REQUIRE_PASS_ACTION = True
+    REQUIRE_GOTO_ACTION = True
     FORCE_AXIS_ALIGNED_START = True
     RANDOMIZE_START_ROTATION_DURING_TRAINING = False
     SMOOTH_NAV = True
@@ -140,6 +141,11 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
             if not cls.REQUIRE_PASS_ACTION
             else ("pass",)
         )
+        goto_actions = (
+            tuple()
+            if not cls.REQUIRE_GOTO_ACTION
+            else ("goto_kitchen", "goto_living_room", "goto_bedroom", "goto_bathroom")
+        )
         return (
             done_actions
             + (
@@ -158,6 +164,7 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
                 *cls.CLOSE_ACTIONS,
                 *cls.PUT_ACTIONS,
             )
+            + goto_actions
             + pass_actions
         )
 
@@ -275,10 +282,15 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
         cls,
         stage: str,
         force_cache_reset: bool,
-        allowed_scenes: Optional[Sequence[str]],
+        # allowed_scenes: Optional[Sequence[str]],
         seed: int,
         task_type: HomeServiceTaskType,
-        scene_to_allowed_inds: Optional[Dict[str, Sequence[int]]] = None,
+        allowed_task_keys: Optional[Sequence[str]] = None,
+        allowed_pickup_objs: Optional[Sequence[str]] = None,
+        allowed_start_receps: Optional[Sequence[str]] = None,
+        allowed_target_receps: Optional[Sequence[str]] = None,
+        allowed_scene_inds: Optional[Sequence[int]] = None,
+        # scene_to_allowed_inds: Optional[Dict[str, Sequence[int]]] = None,
         x_display: Optional[str] = None,
         sensors: Optional[Sequence[Sensor]] = None,
         thor_controller_kwargs: Optional[Dict] = None,
@@ -291,10 +303,15 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
             del kwargs["mp_ctx"]
 
         if not runtime_sample:
-            return HomeServiceTaskSampler.from_fixed_dataset(
+            return HomeServiceTaskSampler.from_fixed_simple_pick_and_place_data(
                 stage=stage,
-                allowed_scenes=allowed_scenes,
-                scene_to_allowed_inds=scene_to_allowed_inds,
+                # allowed_scenes=allowed_scenes,
+                # scene_to_allowed_inds=scene_to_allowed_inds,
+                allowed_task_keys=allowed_task_keys,
+                allowed_pickup_objs=allowed_pickup_objs,
+                allowed_start_receps=allowed_start_receps,
+                allowed_target_receps=allowed_target_receps,
+                allowed_scene_inds=allowed_scene_inds,
                 home_service_env_kwargs=dict(
                     force_cache_reset=force_cache_reset,
                     **cls.ENV_KWARGS,
@@ -323,35 +340,198 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
                 **kwargs,
             )
         else:
-            return HomeServiceTaskSampler.from_scenes_at_runtime(
-                stage=stage,
-                allowed_scenes=allowed_scenes,
-                repeats_before_scene_change=repeats_before_scene_change,
-                home_service_env_kwargs=dict(
-                    force_cache_reset=force_cache_reset,
-                    **cls.ENV_KWARGS,
-                    controller_kwargs={
-                        "x_display": x_display,
-                        **cls.THOR_CONTROLLER_KWARGS,
-                        "renderDepthImage": any(
-                            isinstance(s, DepthSensor) for s in sensors
-                        ),
-                        **(
-                            {} if thor_controller_kwargs is None else thor_controller_kwargs
-                        ),
-                    },
-                ),
-                seed=seed,
-                task_type=task_type,
-                sensors=SensorSuite(sensors),
-                max_steps=cls.MAX_STEPS,
-                discrete_actions=cls.actions(),
-                smooth_nav=cls.SMOOTH_NAV,
-                smoothing_factor=cls.SMOOTHING_FACTOR,
-                require_done_action=cls.REQUIRE_DONE_ACTION,
-                force_axis_aligned_start=cls.FORCE_AXIS_ALIGNED_START,
-                **kwargs,
-            )
+            # return HomeServiceTaskSampler.from_scenes_at_runtime(
+            #     stage=stage,
+            #     allowed_scenes=allowed_scenes,
+            #     repeats_before_scene_change=repeats_before_scene_change,
+            #     home_service_env_kwargs=dict(
+            #         force_cache_reset=force_cache_reset,
+            #         **cls.ENV_KWARGS,
+            #         controller_kwargs={
+            #             "x_display": x_display,
+            #             **cls.THOR_CONTROLLER_KWARGS,
+            #             "renderDepthImage": any(
+            #                 isinstance(s, DepthSensor) for s in sensors
+            #             ),
+            #             **(
+            #                 {} if thor_controller_kwargs is None else thor_controller_kwargs
+            #             ),
+            #         },
+            #     ),
+            #     seed=seed,
+            #     task_type=task_type,
+            #     sensors=SensorSuite(sensors),
+            #     max_steps=cls.MAX_STEPS,
+            #     discrete_actions=cls.actions(),
+            #     smooth_nav=cls.SMOOTH_NAV,
+            #     smoothing_factor=cls.SMOOTHING_FACTOR,
+            #     require_done_action=cls.REQUIRE_DONE_ACTION,
+            #     force_axis_aligned_start=cls.FORCE_AXIS_ALIGNED_START,
+            #     **kwargs,
+            # )
+            pass
+
+    # @classmethod
+    # def stagewise_task_sampler_args(
+    #     cls,
+    #     stage: str,
+    #     process_ind: int,
+    #     total_processes: int,
+    #     headless: bool = False,
+    #     allowed_inds_subset: Optional[Sequence[int]] = None,
+    #     devices: Optional[List[int]] = None,
+    #     seeds: Optional[List[int]] = None,
+    #     deterministic_cudnn: bool = False,
+    # ):
+    #     if stage == "combined":
+
+    #         train_scenes = datagen_utils.get_scenes("train")
+    #         other_scenes = datagen_utils.get_scenes("val") + datagen_utils.get_scenes("test")
+
+    #         assert len(train_scenes) == 2 * len(other_scenes)
+    #         scenes = []
+
+    #         while len(train_scenes) != 0:
+    #             scenes.append(train_scenes.pop())
+    #             scenes.append(train_scenes.pop())
+    #             scenes.append(other_scenes.pop())
+    #         assert len(train_scenes) == len(other_scenes)
+        
+    #     else:
+    #         scenes = datagen_utils.get_scenes(stage)
+
+    #     if total_processes > len(scenes):
+    #         assert stage == "train" and total_processes % len(scenes) == 0
+    #         scenes = scenes * (total_processes // len(scenes))
+
+    #     allowed_scenes = list(
+    #         sorted(partition_sequence(seq=scenes, parts=total_processes,)[process_ind])
+    #     )
+
+    #     scene_to_allowed_inds = None
+    #     if allowed_inds_subset is not None:
+    #         allowed_inds_subset = tuple(allowed_inds_subset)
+    #         # assert stage in ["valid", "train_unseen"]
+    #         scene_to_allowed_inds = {
+    #             scene: allowed_inds_subset for scene in allowed_scenes
+    #         }
+    #     seed = md5_hash_str_as_int(str(allowed_scenes))
+
+    #     device = (
+    #         devices[process_ind % len(devices)]
+    #         if devices is not None and len(devices) > 0
+    #         else torch.device("cpu")
+    #     )
+
+    #     x_display: Optional[str] = None
+    #     if headless:
+    #         if platform.system() == "Linux":
+    #             x_displays = get_open_x_displays(throw_error_if_empty=True)
+
+    #             if devices is not None and len(
+    #                 [d for d in devices if d != torch.device("cpu")]
+    #             ) > len(x_displays):
+    #                 get_logger().warning(
+    #                     f"More GPU devices found than X-displays (devices: `{x_displays}`, x_displays: `{x_displays}`)."
+    #                     f" This is not necessarily a bad thing but may mean that you're not using GPU memory as"
+    #                     f" efficiently as possible. Consider following the instructions here:"
+    #                     f" https://allenact.org/installation/installation-framework/#installation-of-ithor-ithor-plugin"
+    #                     f" describing how to start an X-display on every GPU."
+    #                 )
+    #             x_display = x_displays[process_ind % len(x_displays)]
+
+    #     kwargs = {
+    #         "stage": stage,
+    #         "allowed_scenes": allowed_scenes,
+    #         "scene_to_allowed_inds": scene_to_allowed_inds,
+    #         "seed": seed,
+    #         "x_display": x_display,
+    #     }
+    #     sensors = kwargs.get("sensors", copy.deepcopy(cls.sensors(stage)))
+    #     kwargs["sensors"] = sensors
+
+    #     return kwargs
+
+    # @classmethod
+    # def train_task_sampler_args(
+    #     cls,
+    #     process_ind: int,
+    #     total_processes: int,
+    #     headless: bool = False,
+    #     devices: Optional[List[int]] = None,
+    #     seeds: Optional[List[int]] = None,
+    #     deterministic_cudnn: bool = False,
+    # ):
+    #     return dict(
+    #         force_cache_reset=False,
+    #         epochs=float("inf"),
+    #         **cls.stagewise_task_sampler_args(
+    #             stage="train",
+    #             process_ind=process_ind,
+    #             total_processes=total_processes,
+    #             headless=headless,
+    #             devices=devices,
+    #             seeds=seeds,
+    #             deterministic_cudnn=deterministic_cudnn,
+    #         ),
+    #     )
+
+    # @classmethod
+    # def valid_task_sampler_args(
+    #     cls,
+    #     process_ind: int,
+    #     total_processes: int,
+    #     headless: bool = False,
+    #     devices: Optional[List[int]] = None,
+    #     seeds: Optional[List[int]] = None,
+    #     deterministic_cudnn: bool = False,
+    # ):
+    #     return dict(
+    #         force_cache_reset=True,
+    #         epochs=1,
+    #         **cls.stagewise_task_sampler_args(
+    #             stage="valid",
+    #             allowed_inds_subset=tuple(range(10)),
+    #             process_ind=process_ind,
+    #             total_processes=total_processes,
+    #             headless=headless,
+    #             devices=devices,
+    #             seeds=seeds,
+    #             deterministic_cudnn=deterministic_cudnn,
+    #         ),
+    #     )
+
+    # @classmethod
+    # def test_task_sampler_args(
+    #     cls,
+    #     process_ind: int,
+    #     total_processes: int,
+    #     headless: bool = False,
+    #     devices: Optional[List[int]] = None,
+    #     seeds: Optional[List[int]] = None,
+    #     deterministic_cudnn: bool = False,
+    #     task_spec_in_metrics: bool = False,
+    # ):
+    #     task_spec_in_metrics = False
+
+    #     stage = "combined"
+    #     allowed_inds_subset = None
+
+    #     return dict(
+    #         force_cache_reset=True,
+    #         epochs=1,
+    #         task_spec_in_metrics=task_spec_in_metrics,
+    #         **cls.stagewise_task_sampler_args(
+    #             stage=stage,
+    #             allowed_inds_subset=allowed_inds_subset,
+    #             process_ind=process_ind,
+    #             total_processes=total_processes,
+    #             headless=headless,
+    #             devices=devices,
+    #             seeds=seeds,
+    #             deterministic_cudnn=deterministic_cudnn,
+    #         ),
+    #     )
 
     @classmethod
     def stagewise_task_sampler_args(
@@ -360,50 +540,32 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
         process_ind: int,
         total_processes: int,
         headless: bool = False,
-        allowed_inds_subset: Optional[Sequence[int]] = None,
+        allowed_pickup_objs: Optional[Sequence[str]] = None,
+        allowed_start_receps: Optional[Sequence[str]] = None,
+        allowed_target_receps: Optional[Sequence[str]] = None,
+        allowed_scene_inds: Optional[Sequence[int]] = None,
         devices: Optional[List[int]] = None,
         seeds: Optional[List[int]] = None,
         deterministic_cudnn: bool = False,
     ):
-        if stage == "combined":
+        task_keys = datagen_utils.get_task_keys(stage)
 
-            train_scenes = datagen_utils.get_scenes("train")
-            other_scenes = datagen_utils.get_scenes("val") + datagen_utils.get_scenes("test")
-
-            assert len(train_scenes) == 2 * len(other_scenes)
-            scenes = []
-
-            while len(train_scenes) != 0:
-                scenes.append(train_scenes.pop())
-                scenes.append(train_scenes.pop())
-                scenes.append(other_scenes.pop())
-            assert len(train_scenes) == len(other_scenes)
-        
-        else:
-            scenes = datagen_utils.get_scenes(stage)
-
-        if total_processes > len(scenes):
-            assert stage == "train" and total_processes % len(scenes) == 0
-            scenes = scenes * (total_processes // len(scenes))
-
-        allowed_scenes = list(
-            sorted(partition_sequence(seq=scenes, parts=total_processes,)[process_ind])
+        allowed_task_keys = list(
+            sorted(partition_sequence(seq=task_keys, parts=total_processes,)[process_ind])
         )
 
-        scene_to_allowed_inds = None
-        if allowed_inds_subset is not None:
-            allowed_inds_subset = tuple(allowed_inds_subset)
-            # assert stage in ["valid", "train_unseen"]
-            scene_to_allowed_inds = {
-                scene: allowed_inds_subset for scene in allowed_scenes
-            }
-        seed = md5_hash_str_as_int(str(allowed_scenes))
+        seed = md5_hash_str_as_int(str(task_keys))
 
         device = (
             devices[process_ind % len(devices)]
             if devices is not None and len(devices) > 0
             else torch.device("cpu")
         )
+
+        if allowed_scene_inds is None:
+            allowed_scene_inds = datagen_utils.get_scene_inds(stage)
+        else:
+            assert all([scene_ind in datagen_utils.get_scene_inds(stage) for scene_ind in allowed_scene_inds])
 
         x_display: Optional[str] = None
         if headless:
@@ -424,8 +586,11 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
 
         kwargs = {
             "stage": stage,
-            "allowed_scenes": allowed_scenes,
-            "scene_to_allowed_inds": scene_to_allowed_inds,
+            "allowed_task_keys": allowed_task_keys,
+            "allowed_pickup_objs": allowed_pickup_objs,
+            "allowed_start_receps": allowed_start_receps,
+            "allowed_target_receps": allowed_target_receps,
+            "allowed_scene_inds": allowed_scene_inds,
             "seed": seed,
             "x_display": x_display,
         }
@@ -433,87 +598,6 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
         kwargs["sensors"] = sensors
 
         return kwargs
-
-    @classmethod
-    def train_task_sampler_args(
-        cls,
-        process_ind: int,
-        total_processes: int,
-        headless: bool = False,
-        devices: Optional[List[int]] = None,
-        seeds: Optional[List[int]] = None,
-        deterministic_cudnn: bool = False,
-    ):
-        return dict(
-            force_cache_reset=False,
-            epochs=float("inf"),
-            **cls.stagewise_task_sampler_args(
-                stage="train",
-                process_ind=process_ind,
-                total_processes=total_processes,
-                headless=headless,
-                devices=devices,
-                seeds=seeds,
-                deterministic_cudnn=deterministic_cudnn,
-            ),
-        )
-
-    @classmethod
-    def valid_task_sampler_args(
-        cls,
-        process_ind: int,
-        total_processes: int,
-        headless: bool = False,
-        devices: Optional[List[int]] = None,
-        seeds: Optional[List[int]] = None,
-        deterministic_cudnn: bool = False,
-    ):
-        return dict(
-            force_cache_reset=True,
-            epochs=1,
-            **cls.stagewise_task_sampler_args(
-                stage="valid",
-                allowed_inds_subset=tuple(range(10)),
-                process_ind=process_ind,
-                total_processes=total_processes,
-                headless=headless,
-                devices=devices,
-                seeds=seeds,
-                deterministic_cudnn=deterministic_cudnn,
-            ),
-        )
-
-    @classmethod
-    def test_task_sampler_args(
-        cls,
-        process_ind: int,
-        total_processes: int,
-        headless: bool = False,
-        devices: Optional[List[int]] = None,
-        seeds: Optional[List[int]] = None,
-        deterministic_cudnn: bool = False,
-        task_spec_in_metrics: bool = False,
-    ):
-        task_spec_in_metrics = False
-
-        stage = "combined"
-        allowed_inds_subset = None
-
-        return dict(
-            force_cache_reset=True,
-            epochs=1,
-            task_spec_in_metrics=task_spec_in_metrics,
-            **cls.stagewise_task_sampler_args(
-                stage=stage,
-                allowed_inds_subset=allowed_inds_subset,
-                process_ind=process_ind,
-                total_processes=total_processes,
-                headless=headless,
-                devices=devices,
-                seeds=seeds,
-                deterministic_cudnn=deterministic_cudnn,
-            ),
-        )
 
     @classmethod
     @abstractmethod
