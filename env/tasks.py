@@ -32,6 +32,7 @@ from env.utils import (
     include_object_data,
 )
 
+from ..sEDM.test_edm import sEDM_model
 
 class HomeServiceTaskType(enum.Enum):
 
@@ -534,6 +535,11 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
             task=self,
         )
         """
+        target_object = self.env.current_task_spec.pickup_target['name'].split("_")[0]
+        target_place = self.env.current_task_spec.place_target['name'].split("_")[0]
+        self.task_planner = sEDM_model()
+        task_plan = self.task_planner.inference(target_object=target_object, target_place=target_place)
+        
         if self.task_planner is None:
             task_plan = []
             pickup_object = self.env.current_task_spec.pickup_object
