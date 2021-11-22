@@ -10,7 +10,7 @@ from pycocotools.coco import COCO
 from pycocotools import mask as maskUtils
 from skimage import measure
 from itertools import groupby
-from env.constants import OBJECT_TYPES_WITH_PROPERTIES, REARRANGE_SIM_OBJECTS, PICKUPABLE_OBJECTS, RECEPTACLE_OBJECTS, DEFAULT_COMPATIBLE_RECEPTACLES
+from env.constants import OBJECT_TYPES_WITH_PROPERTIES, REARRANGE_SIM_OBJECTS, PICKUPABLE_OBJECTS, RECEPTACLE_OBJECTS, DEFAULT_COMPATIBLE_RECEPTACLES, SCENE_TO_SCENE_TYPE
 from env.tasks import HomeServiceTaskSampler, HomeServiceTaskType
 from env.sensors import InstanceSegmentationSensor, SubtaskHomeServiceSensor
 from experiments.home_service_base import HomeServiceBaseExperimentConfig
@@ -80,13 +80,16 @@ if __name__ == "__main__":
     # plt.ion()
     # plt.show()
 
-    annotations = [[], [], []]
-    images = [[], [], []]
+    # (seen_objs[train, val, test], unseen_objs[train, val, test])
+    # ([train: seen_scenes, val: seen_scenes, test: unseen_scenes])
+    annotations = [[[], [], []], [[], [], []]]
+    images = [[[], [], []], [[], [], []]]
     ids_set = set()
 
     ROOT_PATH = 'data_detector'
+    categories = ['seen_objs', 'unseen_objs']
     splits = ['train', 'val', 'test']
-    image_paths = [os.path.join(ROOT_PATH, split) for split in splits]
+    image_paths = [os.path.join(ROOT_PATH, category, split) for split in splits for category in categories]
     for img_path in image_paths:
         if not os.path.exists(img_path):
             os.makedirs(img_path)
@@ -96,80 +99,83 @@ if __name__ == "__main__":
         renderInstanceSegmentation=True,
         quality="Ultra",
     )
-    task_sampler_params = HomeServiceBaseExperimentConfig.stagewise_task_sampler_args(
-        stage="combined", process_ind=0, total_processes=1, headless=False, allowed_inds_subset=tuple(range(10)),
-    )
-    # task_sampler_params['discrete_actions'] = ACTIONS
-    # task_sampler_params['allowed_scenes'] = ['FloorPlan1']
-    # allowed_scene_inds = {scene: tuple(range(1)) for scene in task_sampler_params['allowed_scenes']}
-    # task_sampler_params['scene_to_allowed_inds'] = allowed_scene_inds
-    for sensor in task_sampler_params['sensors']:
-        if isinstance(sensor, SubtaskHomeServiceSensor):
-            task_sampler_params['sensors'].remove(sensor)
+    stages = ['train_seen', 'train_unseen', 'test_seen', 'test_unseen']
+    for stage in stages:
+        task_sampler_params = HomeServiceBaseExperimentConfig.stagewise_task_sampler_args(
+            stage=stage, process_ind=0, total_processes=1, headless=False,
+        )
 
-    task_sampler_params['sensors'].append(
-        InstanceSegmentationSensor(ordered_object_types=HOME_SERVICE_OBJECTS)
-    )
-    task_sampler: HomeServiceTaskSampler = HomeServiceBaseExperimentConfig.make_sampler_fn(
-        **task_sampler_params,
-        task_type=HomeServiceTaskType.REARRANGE,
-        thor_controller_kwargs=thor_controller_kwargs,
-        force_cache_reset=True,
-        runtime_sample=False,
-        repeats_before_scene_change=1,
-        epochs=1,
-    )
+        for sensor in task_sampler_params['sensors']:
+            if isinstance(sensor, SubtaskHomeServiceSensor):
+                task_sampler_params['sensors'].remove(sensor)
 
-    task = task_sampler.next_task()
-    for iter in range(task_sampler.total_unique):
-        print(f'Collection progress... [{iter + 1}/{task_sampler.total_unique}]')
-        idx = int(task_sampler.current_task_spec.unique_id.split('__')[2])
-        if idx % 5 < 3:
-            path_idx = 0
-        elif idx % 5 == 3:
-            path_idx = 1
-        else:
-            path_idx = 2
+        task_sampler_params['sensors'].append(
+            InstanceSegmentationSensor(ordered_object_types=HOME_SERVICE_OBJECTS)
+        )
+        task_sampler: HomeServiceTaskSampler = HomeServiceBaseExperimentConfig.make_sampler_fn(
+            **task_sampler_params,
+            task_type=HomeServiceTaskType.REARRANGE,
+            thor_controller_kwargs=thor_controller_kwargs,
+            force_cache_reset=True,
+            runtime_sample=False,
+            repeats_before_scene_change=1,
+            epochs=1,
+        )
 
-        for _ in range(3):
-            obs = task.get_observations()
-            # ax[0].imshow(obs['rgb'])
-            # ax[1].imshow(obs['instance_segmentation']['inst_seg_on_rgb'])
-            # for bbox in obs['instance_segmentation']['inst_bbox']:
-            #     ax[1].add_patch(
-            #         patches.Rectangle(
-            #             (bbox[0], bbox[1]),
-            #             bbox[2] - bbox[0],
-            #             bbox[3] - bbox[1],
-            #             edgecolor='blue',
-            #             fill=False
-            #         )
-            #     )
-            # for i in range(obs['instance_segmentation']['inst_label'].shape[0]):
-            #     x_min, y_min, x_max, y_max = obs['instance_segmentation']['inst_bbox'][i]
-            #     mask = obs['instance_segmentation']['inst_mask'][i]
-            #     poly = binary_mask_to_polygon(mask)
-            #     rles = maskUtils.frPyObjects(poly, 224, 224)
-            #     rle = maskUtils.merge(rles)
-            #     m = maskUtils.decode(rle)
-            #     ax[2].imshow(m)
-            #     plt.draw()
-            #     plt.pause(0.001)
+        task = task_sampler.next_task()
+        task.env.reset(
+            task_spec=task_sampler.current_task_spec,
+            scene_type=SCENE_TO_SCENE_TYPE[task_sampler.current_task_spec.target_scene]
+        )
+        obs = task.get_observations()
+        for iter in range(task_sampler.total_unique):
+            print(f'Collection progress... [{iter + 1}/{task_sampler.total_unique}]')
+            category_obj = task_sampler.stage.split('_')[0]
+            if category_obj == "train":
+                category_obj_idx = 0
+            elif category_obj == "test":
+                category_obj_idx = 1
+            
+            category_scene = task_sampler.stage.split('_')[1]
+            if category_scene == "seen":
+                if task_sampler.current_task_spec.scene_index % 10 != 0:
+                    category_scene_idx = 0
+                else:
+                    category_scene_idx = 1
+            elif category_scene == "unseen":
+                category_scene_idx = 2
 
-            # plt.draw()
-            # plt.pause(0.001)
-            action = random.choice(range(1, len(ACTIONS)))
-            task.step(action)
-        
-        for _ in range(num_iter_per_task):
-            if num_steps % 30 == 0:
-                rps = task.env.controller.step("GetReachablePositions").metadata["actionReturn"]
-                task.env.controller.step(action="Teleport", position=random.choice(rps))
+            for poses in task_sampler.current_task_spec.starting_poses:
+                obj_name = poses['name']
+                obj = next(
+                    (
+                        obj 
+                        for obj in task.env.last_event.metadata['objects']
+                        if obj['name'] == obj_name
+                    ), None
+                )
+                if obj is None:
+                    continue
 
-            obs = task.get_observations()
-            if num_steps % 5 == 0:
+                tp_success = False
+                interactable_positions = task.env._interactable_positions_cache.get(
+                    scene_name=task.env.scene, obj=obj, controller=task.env.controller
+                )
+                random.shuffle(interactable_positions)
+                while not tp_success and len(interactable_positions) > 0: 
+                    tp_position = interactable_positions.pop()
+                    tp_pos = dict(x=tp_position["x"], y=tp_position["y"], z=tp_position["z"])
+                    tp_rot = dict(x=0, y=tp_position["rotation"], z=0)
+                    tp_std = tp_position["standing"]
+                    tp_hor = tp_position["horizon"]
+                    task.env.controller.step(
+                        action="TeleportFull", position=tp_pos, rotation=tp_rot, horizon=tp_hor, standing=tp_std
+                    )
+                    tp_success = task.env.last_event.metadata["lastActionSuccess"]
+                
+                obs = task.get_observations()
                 add_img = False
-                for i in range(obs['instance_segmentation']['inst_label'].shape[0]):
+                for i in range(obs["instance_segmentation"]["inst_label"].shape[0]):
                     x_min, y_min, x_max, y_max = obs['instance_segmentation']['inst_bbox'][i]
                     x_min = int(x_min)
                     y_min = int(y_min)
@@ -189,15 +195,15 @@ if __name__ == "__main__":
                         segmentation=poly,
                         iscrowd=0
                     )
-                    annotations[path_idx].extend([data_anno])
+                    annotations[category_obj_idx][category_scene_idx].extend([data_anno])
                     coco_id += 1
                     add_img = True
 
                 if add_img:
                     img_rgb = Image.fromarray((obs['rgb'] * 255).astype(np.uint8))
-                    img_name = os.path.join(image_paths[path_idx], f'{img_idx:06d}.png')
+                    img_name = os.path.join(image_paths[category_obj_idx][category_scene_idx], f'{img_idx:06d}.png')
                     img_rgb.save(img_name)
-                    images[path_idx].append(
+                    images[category_obj_idx][category_scene_idx].append(
                         dict(
                             id=img_idx,
                             file_name=img_name,
@@ -207,20 +213,17 @@ if __name__ == "__main__":
                     )
                     img_idx += 1
 
-            action = random.choice(range(1, len(ACTIONS)))
-            task.step(action)
-            num_steps += 1
+            task = task_sampler.next_task()
 
-        task = task_sampler.next_task()
+        task_sampler.close()
 
-    task_sampler.close()
-
-    for idx, split in enumerate(splits):
-        coco_format_json = dict(
-            images=images[idx],
-            annotations=annotations[idx],
-            categories=[{'id': i, 'name': t} for i, t in enumerate(HOME_SERVICE_OBJECTS)]
-        )
-        with open(os.path.join(ROOT_PATH, f'anno_{split}.json'), 'w') as f:
-            json.dump(coco_format_json, f)
+    for category_object_idx, category_object in enumerate(categories):
+        for category_scene_idx, category_scene in enumerate(splits):
+            coco_format_json = dict(
+                images=images[category_obj_idx][category_scene_idx],
+                annotations=annotations[category_obj_idx][category_scene_idx],
+                categories=[{'id': i, 'name': t} for i, t in enumerate(HOME_SERVICE_OBJECTS)]
+            )
+            with open(os.path.join(ROOT_PATH, category_object, f'anno_{category_scene}.json'), 'w') as f:
+                json.dump(coco_format_json, f)
 

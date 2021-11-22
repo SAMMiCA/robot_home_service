@@ -1190,8 +1190,7 @@ class HomeServiceTaskSampler(TaskSampler):
     def next_task(
         self, 
         forced_task_spec: Optional[HomeServiceTaskSpec] = None,
-        # pickup_target: str = None,
-        # place_target: str = None,
+        forced_start_scene_type: Optional[str] = None,
         **kwargs
     ) -> Optional[HomeServiceBaseTask]:
 
@@ -1210,6 +1209,7 @@ class HomeServiceTaskSampler(TaskSampler):
             self.env.reset(
                 task_spec=task_spec,
                 force_axis_aligned_start=self.force_axis_aligned_start,
+                scene_type=forced_start_scene_type,
             )
 
             if self.task_type == HomeServiceTaskType.SIMPLE_PICK_AND_PLACE:
