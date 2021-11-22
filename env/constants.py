@@ -47,6 +47,24 @@ SCENE_TYPE_TO_LABEL = {
     "Bathroom": 4,
 }
 
+SCENE_GRAPH_DIR = os.path.join(
+    os.path.abspath(os.path.dirname(Path(__file__))), '../scene_graph'
+)
+# Yolact Arguments
+YOLACT_KWARGS = {
+    "trained_model": os.path.join(SCENE_GRAPH_DIR, "weights/yolact_base_357_200000.pth"),
+    "top_k": 5,
+    "cuda": True,
+    "fast_nms": True,
+    "cross_class_nms": False,
+    "display_masks": True,
+    "display_bboxes": True,
+    "display_text": True,
+    "display_scores": True,
+    "score_threshold": 0.85,
+    "dataset": "robot_home_service_dataset",
+}
+
 # fmt: off
 REARRANGE_SIM_OBJECTS = [
     # A

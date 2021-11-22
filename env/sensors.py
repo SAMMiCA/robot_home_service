@@ -1,10 +1,18 @@
 import enum
 from typing import Any, Optional, Sequence, Union
+import torch
 
 import gym.spaces
 import numpy as np
 from allenact.base_abstractions.sensor import Sensor
 from allenact.base_abstractions.task import Task
+from scene_graph.layers.output_utils import postprocess
+from scene_graph.utils.augmentations import FastBaseTransform
+
+from scene_graph.utils.functions import SavePath
+from scene_graph.yolact import Yolact
+from scene_graph.data import Config, cfg, set_cfg, set_dataset
+
 try:
     from allenact.embodiedai.sensors.vision_sensors import RGBSensor
 except ImportError:
@@ -20,6 +28,7 @@ from env.tasks import (
     HomeServiceBaseTask,
     AbstractHomeServiceTask,
 )
+
 
 
 class RGBHomeServiceSensor(
@@ -138,17 +147,23 @@ class SubtaskHomeServiceSensor(
             subtask_place_visible = 0
         elif current_subtask_action in ("Navigate", "Pickup", "Open", "Close"):
             assert env.scene == env.current_task_spec.target_scene
+
+            # from metadata
             subtask_target = next(
                 (o for o in env.last_event.metadata['objects'] if o['objectType'] == current_subtask_target), None
             )
-            assert subtask_target is not None, f"subtask: {current_subtask_action}, subtask_target: {current_subtask_target}"
-            subtask_target_type = self.object_type_to_ind[subtask_target['objectType']] + 1 + 4
-            subtask_target_position = np.array(list(subtask_target["position"].values()), dtype=np.float32)
-            subtask_target_visible = subtask_target["visible"] + 1
+            # assert subtask_target is not None, f"subtask: {current_subtask_action}, subtask_target: {current_subtask_target}"
+            # subtask_target_type = self.object_type_to_ind[subtask_target['objectType']] + 1 + 4
+            # subtask_target_position = np.array(list(subtask_target["position"].values()), dtype=np.float32)
+            # subtask_target_visible = subtask_target["visible"] + 1
+            subtask_target_type = self.object_type_to_ind[current_subtask_target] + 1 + 4
+            subtask_target_position = task.target_positions[current_subtask_target]
+            subtask_target_visible = subtask_target["visible"] + 1 # Should be modified
 
             subtask_place_type = 0
             subtask_place_position = np.zeros(3, dtype=np.float32)
             subtask_place_visible = 0
+
         elif current_subtask_action == "Put":
             assert env.scene == env.current_task_spec.target_scene
             assert env.held_object is not None
@@ -156,13 +171,17 @@ class SubtaskHomeServiceSensor(
             subtask_target_type = self.object_type_to_ind[current_subtask_target] + 1 + 4
             subtask_target_position = np.zeros(3, dtype=np.float32)
             subtask_target_visible = 0
+
+            # from metadata
             subtask_place = next(
                 (o for o in env.last_event.metadata['objects'] if o['objectType'] == current_subtask_place), None
             )
-            assert subtask_place is not None
-            subtask_place_type = self.object_type_to_ind[subtask_place['objectType']] + 1
-            subtask_place_position = np.array(list(subtask_place["position"].values()), dtype=np.float32)
-            subtask_place_visible = subtask_place["visible"] + 1
+            # assert subtask_place is not None
+            # subtask_place_type = self.object_type_to_ind[subtask_place['objectType']] + 1
+            # subtask_place_position = np.array(list(subtask_place["position"].values()), dtype=np.float32)
+            subtask_place_type = self.object_type_to_ind[current_subtask_place] + 1 + 4
+            subtask_place_position = task.target_positions[current_subtask_place]
+            subtask_place_visible = subtask_place["visible"] + 1 # Should be modified
         else:
             raise RuntimeError()
 
@@ -327,3 +346,91 @@ class InstanceSegmentationSensor(
             'inst_bbox': np.array(inst_bbox),
             'inst_detected': inst_detected,
         }
+
+# class YolactObjectDetectionSensor(
+#     Sensor[HomeServiceTHOREnvironment, HomeServiceBaseTask]
+# ):
+#     def __init__(
+#         self,
+#         ordered_object_types: Sequence[str] = None,
+#         uuid: str = "yolact",
+#         *args: Any,
+#         **kwargs: Any,
+#     ):
+
+#         self.ordered_object_types = list(ordered_object_types)
+#         assert self.ordered_object_types == sorted(self.ordered_object_types)
+        
+#         model_path = SavePath.from_str(kwargs["trained_model"])
+#         config = model_path.model_name + "_config"
+#         set_cfg(config)
+#         set_dataset(kwargs["dataset"])
+#         cfg.num_classes = len(cfg.dataset.class_names) + 1
+#         assert len(self.ordered_object_types) == cfg.num_classes - 1
+#         net = Yolact()
+#         net.load_weights(kwargs["trained_model"])
+#         net.eval()
+#         self.cuda = False
+#         if kwargs['cuda']:
+#             net = net.cuda()
+#             self.cuda = True
+
+#         net.detect.use_fast_nms = kwargs['fast_nms']
+#         net.detect.use_cross_class_nms = kwargs['cross_class_nms']
+#         # cfg.mask_proto_debug = kwargs['mask_proto_debug']
+#         self.net = net
+        
+#         self.object_type_to_idn = {ot: i for i, ot in enumerate(self.ordered_object_types)}
+#         self.idn_to_object_type = {i: ot for i, ot in enumerate(self.ordered_object_types)}
+
+#         observation_space = gym.spaces.Space()
+#         super().__init__(**prepare_locals_for_super(locals()))
+
+#     def get_observation(
+#         self,
+#         env: HomeServiceTHOREnvironment,
+#         task: Optional[Task[HomeServiceTHOREnvironment]],
+#         *args: Any,
+#         **kwargs: Any,
+#     ) -> Any:
+#         e = env.last_event
+#         rgb = e.frame.copy()
+#         h, w, _ = rgb.shape
+#         depth = e.depth_frame.copy()
+
+#         rgb = torch.from_numpy(rgb).float()
+#         if self.cuda:
+#             rgb = rgb.cuda()
+#         batch = FastBaseTransform()(rgb.unsqueeze(0))
+
+#         with torch.no_grad():
+#             preds = self.net(batch)
+        
+#         save = cfg.rescore_bbox
+#         cfg.rescore_bbox = True
+#         t = postprocess(preds, w, h, )
+
+#         inst_seg_frame = e.instance_segmentation_frame
+#         inst_mask = []
+#         inst_bbox = []
+#         inst_label = []
+#         inst_detected = np.zeros(len(self.ordered_object_types), dtype=np.int32)
+
+#         det_objs = [obj for obj in e.instance_masks if obj.split('|')[0] in self.ordered_object_types]
+#         for obj in det_objs:
+#             obj_type = obj.split("|")[0]
+#             obj_type_idx = self.object_type_to_idn[obj_type]
+#             rgb[e.instance_masks[obj]] = inst_seg_frame[e.instance_masks[obj]]
+#             inst_label.append(obj_type_idx)
+#             inst_mask.append(e.instance_masks[obj])
+#             inst_bbox.append(e.instance_detections2D[obj])
+#             inst_detected[obj_type_idx] += 1
+
+#         return {
+#             'inst_seg_image': inst_seg_frame,
+#             'inst_seg_on_rgb': rgb,
+#             'inst_label': np.array(inst_label),
+#             'inst_mask': np.array(inst_mask),
+#             'inst_bbox': np.array(inst_bbox),
+#             'inst_detected': inst_detected,
+#         }

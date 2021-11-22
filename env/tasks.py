@@ -32,7 +32,7 @@ from env.utils import (
     include_object_data,
 )
 
-from ..sEDM.test_edm import sEDM_model
+from sEDM.test_edm import sEDM_model
 
 class HomeServiceTaskType(enum.Enum):
 
@@ -82,6 +82,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         discrete_actions: Tuple[str, ...],
         smooth_nav: bool = False,
         smoothing_factor: int = 1,
+        force_axis_aligned_start: bool = False,
         require_done_action: bool = False,
         task_spec_in_metrics: bool = False,
     ) -> None:
@@ -93,14 +94,25 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         self.discrete_actions = discrete_actions
         self.smooth_nav = smooth_nav
         self.smoothing_factor = smoothing_factor if self.smooth_nav else 1
+        self.force_axis_aligned_start = force_axis_aligned_start
         self.require_done_action = require_done_action
         self.task_spec_in_metrics = task_spec_in_metrics
 
         self._took_end_action: bool = False
+        self._took_goto_action: bool = False
+        self._check_goto_done: bool = False
+        self._1st_check: bool = False
+        self._2nd_check: bool = False
+
+        self._target_positions: Dict[str, np.array] = {}
+        self._target_visibles: Dict[str, bool] = {}
+        # self._place_position: Optional[np.array] = None
+        # self._place_visible: Optional[bool] = None
 
         self.task_planner = None
         self.greedy_expert = None
         self._subtask_step = 0
+        self._planned_task = None
 
         self.actions_taken = []
         self.actions_taken_success = []
@@ -111,18 +123,52 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         return gym.spaces.Discrete(len(self.action_names()))
 
     @property
+    def target_positions(self) -> Dict[str, np.ndarray]:
+        return self._target_positions
+
+    @property
+    def target_visibles(self) -> Dict[str, bool]:
+        return self._target_visibles
+
+    @target_positions.setter
+    def target_positions(self, pos_dict: Dict[str, Union[np.ndarray, dict]]):
+        for k, v in pos_dict.items():
+            if isinstance(v, np.ndarray):
+                self._target_positions[k] = v
+            elif isinstance(v, dict):
+                self._target_positions[k] = np.array([v["x"], v["y"], v["z"]], dtype=np.float32)
+    
+    @target_visibles.setter
+    def target_visibles(self, vis_dict: Dict[str, bool]):
+        for k, v in vis_dict.items():
+            self._target_visibles[k] = v
+
+    # @place_position.setter
+    # def place_position(self, position: Optional[Union[np.ndarray, dict]]):
+    #     if isinstance(position, np.ndarray):
+    #         self._place_position = position
+    #     elif isinstance(position, dict):
+    #         self._place_position = np.array([position["x"], position["y"], position["z"]], dtype=np.float32)
+
+    # @place_visible.setter
+    # def place_visible(self, visible: Optional[bool]):
+    #     self._place_visible = visible
+
+    @property
     def num_subtasks(self) -> int:
-        return len(self.query_planner())
+        return len(self.planned_task)
 
     @property
     def planned_task(self):
-        return self.query_planner()
+        if self._planned_task is None:
+            self._planned_task = self.query_planner()
+        return self._planned_task
 
     @property
     def current_subtask(self):
         return (
-            self.planned_task[self.subtask_step()] 
-            if self.subtask_step() < self.num_subtasks
+            self.planned_task[self._subtask_step] 
+            if self._subtask_step < self.num_subtasks
             else ("Done", None, None)
         )
     
@@ -189,9 +235,14 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         elif subtask_action == "Goto":
             if metadata["lastActionSuccess"] and (
                 SCENE_TO_SCENE_TYPE[self.env.scene] == subtask_target
-            ):
+            ) and self._check_goto_done:
                 self._subtask_step += 1
+                self._check_goto_done = False
                 return True
+        
+        elif subtask_action == "Scan":
+            # TODO
+            return True
 
         else:
             raise NotImplementedError(
@@ -227,10 +278,10 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
     def query_planner(self):
         return []
 
-    def _judge(self, obs, action, next_obs, action_success) -> float:
+    def _judge(self, obs, action, next_obs, action_success, subtask_done) -> float:
         """Return the reward from a new (s, a, s')."""
         reward = -0.05
-        if self.is_current_subtask_done():
+        if subtask_done:
             reward += 1
 
         if self.current_subtask[0] == "Done":
@@ -401,8 +452,8 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
             )
             with include_object_data(self.env.controller):
                 metadata = self.env.last_event.metadata
-                pickup_target = self.env.current_task_spec.pickup_target
-                place_target = self.env.current_task_spec.place_target
+                pickup_object = self.env.current_task_spec.pickup_object
+                place_receptacle = self.env.current_task_spec.place_receptacle
 
                 if len(metadata["inventoryObjects"]) == 0:
                     action_success = False
@@ -412,8 +463,8 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
                         if (
                             obj["visible"]
                             and obj["receptacle"]
-                            and obj["objectType"] == object_type
-                            and obj["name"] == place_target["name"]
+                            and obj["objectType"] == place_receptacle
+                            # and obj["name"] == place_target["name"]
                         ):
                             object_before = obj
                             break
@@ -480,9 +531,12 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
             assert scene_type in ("kitchen", "living_room", "bedroom", "bathroom")
             self.env.reset(
                 task_spec=self.env.current_task_spec,
+                force_axis_aligned_start=self.force_axis_aligned_start,
                 scene_type=stringcase.pascalcase(scene_type)
             )
             action_success = self.env.last_event.metadata['lastActionSuccess']
+            if action_success:
+                self._took_goto_action = True
         else:
             raise RuntimeError(
                 f"Action '{action_name}' is not in the action space {HomeServiceActionSpace}"
@@ -493,6 +547,8 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         if self.task_spec_in_metrics:
             self.agent_locs.appned(self.env.get_agent_location())
         
+        subtask_done = self.is_current_subtask_done()
+
         return RLStepResult(
             observation=None,
             reward=self._judge(
@@ -500,6 +556,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
                 action=action,
                 next_obs=self.get_observations(),
                 action_success=action_success,
+                subtask_done=subtask_done
             ),
             done=self.is_done(),
             info={"action_name": action_name, "action_success": action_success},
@@ -535,10 +592,23 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
             task=self,
         )
         """
-        target_object = self.env.current_task_spec.pickup_target['name'].split("_")[0]
-        target_place = self.env.current_task_spec.place_target['name'].split("_")[0]
+        target_object = self.env.current_task_spec.pickup_object
+        target_place = self.env.current_task_spec.place_receptacle
+        start_scene = self.env.current_task_spec.start_scene
+        start_scene_type = SCENE_TO_SCENE_TYPE[start_scene]
+        target_scene = self.env.current_task_spec.target_scene
+        target_scene_type = SCENE_TO_SCENE_TYPE[target_scene]
+
+        task_plan = []
+        task_plan.append(("Goto", target_scene_type, None))
+        task_plan.append(("Scan", None, None))
         self.task_planner = sEDM_model()
-        task_plan = self.task_planner.inference(target_object=target_object, target_place=target_place)
+        planner_result = self.task_planner.inference(target_object=target_object, target_place=target_place)
+        if target_place == "User":
+            task_plan.extend(planner_result[:2])
+            task_plan.append(("Goto", start_scene_type, None))
+        else:
+            task_plan.extend(planner_result)
         
         if self.task_planner is None:
             task_plan = []
@@ -559,7 +629,7 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
                 task_plan.append(("Put", pickup_object, place_receptacle))
             else:
                 task_plan.append(("Goto", start_scene_type, None))
-
+        
         return task_plan
         
     def query_expert(self, **kwargs) -> Tuple[Any, bool]:
@@ -745,7 +815,7 @@ class HomeServiceTaskSpecIterable:
         return self.remaining_task_keys
 
     def __next__(self) -> HomeServiceTaskSpec:
-        if len(self.task_spec_dicts_for_current_task_key) == 0:
+        while len(self.task_spec_dicts_for_current_task_key) == 0:
             if len(self.remaining_task_keys) == 0:
                 self.refresh_remaining_scenes()
             self.current_task_key = self.remaining_task_keys.pop()
@@ -1143,22 +1213,24 @@ class HomeServiceTaskSampler(TaskSampler):
 
                 self._last_sampled_task = HomeServiceSimplePickAndPlaceTask(
                     sensors=self.sensors,
-                    env = self.env,
+                    env=self.env,
                     max_steps=self.max_steps,
                     discrete_actions=self.discrete_actions,
                     smooth_nav=self.smooth_nav,
                     smoothing_factor=self.smoothing_factor,
+                    force_axis_aligned_start=self.force_axis_aligned_start,
                     require_done_action=self.require_done_action,
                     task_spec_in_metrics=self.task_spec_in_metrics,
                 )
             else:
                 self._last_sampled_task = HomeServiceBaseTask(
                     sensors=self.sensors,
-                    env = self.env,
+                    env=self.env,
                     max_steps=self.max_steps,
                     discrete_actions=self.discrete_actions,
                     smooth_nav=self.smooth_nav,
                     smoothing_factor=self.smoothing_factor,
+                    force_axis_aligned_start=self.force_axis_aligned_start,
                     require_done_action=self.require_done_action,
                     task_spec_in_metrics=self.task_spec_in_metrics,
                 )

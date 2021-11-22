@@ -730,7 +730,13 @@ class HomeServiceTHOREnvironment:
             )
 
         pos = self.current_task_spec.agent_positions[scene_type]
-        rot = {"x": 0, "y": self.current_task_spec.agent_rotations[scene_type], "z": 0}
+        rot = {
+            "x": 0, 
+            "y": round_to_factor(
+                self.current_task_spec.agent_rotations[scene_type], 90
+            ) if force_axis_aligned_start else self.current_task_spec.agent_rotations[scene_type],
+            "z": 0,
+        }
         self.controller.step(
             "TeleportFull",
             **pos,
@@ -739,6 +745,7 @@ class HomeServiceTHOREnvironment:
             standing=True,
             forceAction=True,
         )
+        assert self.controller.last_event.metadata["lastActionSuccess"]
 
         if reset_scene == self.current_task_spec.target_scene:
             with include_object_data(self.controller):

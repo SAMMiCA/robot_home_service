@@ -1,5 +1,5 @@
 import numpy as np
-from utils import fuzzy_or, fuzzy_and
+from sEDM.utils import fuzzy_or, fuzzy_and
 
 
 class EDMAP(object):

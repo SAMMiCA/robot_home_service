@@ -1,7 +1,9 @@
 import re
-from sedm import EDM, sEDM
-from data_fasttext import new_ft_dict
-from data_bert import match_most_similar
+import os
+from pathlib import Path
+from sEDM.sedm import EDM, sEDM
+from sEDM.data_fasttext import new_ft_dict
+from sEDM.data_bert import match_most_similar
 
 
 def replace_action(seq):
@@ -13,7 +15,7 @@ def replace_action(seq):
 class sEDM_model(object):
     def __init__(self):
         self.sedm = sEDM()
-        self.sedm.load(filename="weight_unique.pickle")
+        self.sedm.load(filename=os.path.join(os.path.abspath(os.path.dirname(Path(__file__))), "weight_unique.pickle"))
         # self.pair_cos = match_most_similar(metric="cosine")
 
     def inference(self, target_object, target_place):

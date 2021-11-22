@@ -1,11 +1,13 @@
+import os
+from pathlib import Path
 import pickle
 import torch
 from transformers import BertTokenizer, BertModel
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics.pairwise import euclidean_distances
 
-train_file = open("train_unique_data.pkl", "rb")
-test_file = open("test_unique_data.pkl", "rb")
+train_file = open(os.path.join(os.path.abspath(os.path.dirname(Path(__file__))), "train_unique_data.pkl"), "rb")
+test_file = open(os.path.join(os.path.abspath(os.path.dirname(Path(__file__))), "test_unique_data.pkl"), "rb")
 data_dict_train = pickle.load(train_file)
 data_dict_test = pickle.load(test_file)
 
@@ -55,8 +57,8 @@ def dataload_train(v):
                                     pad_to_max_length=True,  # Add [PAD]s
                                     return_attention_mask=True,  # Generate the attention mask
                                     return_tensors='pt')  # ask the function to return PyTorch tensors)
-    input_ids_goals = encoded_goals['input_ids']
-    attn_mask_goals = encoded_goals['attention_mask']
+    input_ids_goals = encoded_goals['input_ids'].to(torch.device('cpu'))
+    attn_mask_goals = encoded_goals['attention_mask'].to(torch.device('cpu'))
 
     for obj in objects:
         encoded_objects = tokenizer.encode_plus(text=obj.lower(),  # the sentence to be encoded
@@ -66,8 +68,8 @@ def dataload_train(v):
                                           return_attention_mask=True,  # Generate the attention mask
                                           return_tensors='pt')  # ask the function to return PyTorch tensors)
         input_ids_objects.append(encoded_objects['input_ids'])
-    input_ids_objects = torch.cat(input_ids_objects, dim=0)
-    attn_mask_objects = encoded_objects['attention_mask']
+    input_ids_objects = torch.cat(input_ids_objects, dim=0).to(torch.device('cpu'))
+    attn_mask_objects = encoded_objects['attention_mask'].to(torch.device('cpu'))
 
     model.eval()
     with torch.no_grad():
@@ -87,8 +89,8 @@ def dataload_test(target_object, target_place):
                                           pad_to_max_length=True,  # Add [PAD]s
                                           return_attention_mask=True,  # Generate the attention mask
                                           return_tensors='pt')  # ask the function to return PyTorch tensors)
-    input_ids_goal = encoded_goal['input_ids']
-    attn_mask_goal = encoded_goal['attention_mask']
+    input_ids_goal = encoded_goal['input_ids'].to(torch.device('cpu'))
+    attn_mask_goal = encoded_goal['attention_mask'].to(torch.device('cpu'))
 
     for obj in objects:
         encoded_objects = tokenizer.encode_plus(text=obj.lower(),  # the sentence to be encoded
@@ -98,8 +100,8 @@ def dataload_test(target_object, target_place):
                                           return_attention_mask=True,  # Generate the attention mask
                                           return_tensors='pt')  # ask the function to return PyTorch tensors)
         input_ids_objects.append(encoded_objects['input_ids'])
-    input_ids_objects = torch.cat(input_ids_objects, dim=0)
-    attn_mask_objects = encoded_objects['attention_mask']
+    input_ids_objects = torch.cat(input_ids_objects, dim=0).to(torch.device('cpu'))
+    attn_mask_objects = encoded_objects['attention_mask'].to(torch.device('cpu'))
 
     model.eval()
     with torch.no_grad():

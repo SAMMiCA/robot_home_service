@@ -1,7 +1,7 @@
 import math
 import numpy as np
 import itertools
-from utils import err, fuzzy_and, fuzzy_or
+from sEDM.utils import err, fuzzy_and, fuzzy_or
 
 class DRN(object):
     def __init__(self, channel=1, lr=1.0, glr=1.0, alpha=1.0, rho=1, d=2, gamma=1):

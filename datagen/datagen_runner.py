@@ -615,9 +615,9 @@ if __name__ == "__main__":
                     stage = "train"
                 stage = "_".join([stage, room_seen])
                 if room_seen == "seen":
-                    scene_inds = range(1, 26)
+                    scene_inds = range(1, 21)
                 elif room_seen == "unseen":
-                    scene_inds = range(26, 31)
+                    scene_inds = range(21, 31)
                 else:
                     raise RuntimeError
 

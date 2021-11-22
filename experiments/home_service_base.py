@@ -37,6 +37,7 @@ from env.constants import (
     HORIZON_ANGLE,
     THOR_COMMIT_ID,
     VISIBILITY_DISTANCE,
+    YOLACT_KWARGS,
 )
 from env.environment import HomeServiceMode
 from env.sensors import RGBHomeServiceSensor, DepthHomeServiceSensor, RelativePositionChangeSensor, SubtaskHomeServiceSensor
@@ -78,6 +79,8 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
     INCLUDE_OTHER_MOVE_ACTIONS = False
     ORDERED_OBJECT_TYPES = list(sorted(PICKUPABLE_OBJECTS + RECEPTACLE_OBJECTS))
     FOV = FOV
+
+    # YOLACT_KWARGS = YOLACT_KWARGS
 
     # Training parameters
     TRAINING_STEPS = int(75e6)
@@ -188,8 +191,11 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
             ),
             SubtaskHomeServiceSensor(
                 object_types=cls.ORDERED_OBJECT_TYPES,
-            )
-
+            ),
+            # YolactObjectDetectionSensor(
+            #     ordered_object_types=cls.ORDERED_OBJECT_TYPES,
+            #     **cls.YOLACT_KWARGS
+            # )
         ]
 
         return sensors
@@ -335,8 +341,8 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
                 smoothing_factor=cls.SMOOTHING_FACTOR,
                 require_done_action=cls.REQUIRE_DONE_ACTION,
                 force_axis_aligned_start=cls.FORCE_AXIS_ALIGNED_START,
-                randomize_start_rotation=stage == "train"
-                and cls.RANDOMIZE_START_ROTATION_DURING_TRAINING,
+                randomize_start_rotation=(stage == "train"
+                and cls.RANDOMIZE_START_ROTATION_DURING_TRAINING),
                 **kwargs,
             )
         else:

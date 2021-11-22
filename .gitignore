@@ -156,3 +156,4 @@ sEDM/
 data_detector
 data/home_service/5_1
 data/home_service/old
+.word_vectors_cache

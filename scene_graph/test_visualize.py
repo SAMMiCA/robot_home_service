@@ -378,17 +378,18 @@ class ScannetVis(QWidget):
                                            vertex_colors=colors/255.)
                     self.scan_vis.update()
 
+                    self.prev_R = R_
+                    self.prev_t = self.scan.tsdf_vol.camera_3D_pose
                     if self.scan.num_dets_to_consider > 0 and self.scan.tsdf_vol.debug_same_node_detector:
                         self.mean_pose = np.array(self.scan.tsdf_vol.mask_centers)
-                        mean_pose = self.center_view_point(self.mean_pose, R_, self.scan.tsdf_vol.camera_3D_pose, rot_90_x)
+                        if len(self.mean_pose) > 0:
+                            mean_pose = self.center_view_point(self.mean_pose, R_, self.scan.tsdf_vol.camera_3D_pose, rot_90_x)
 
-                        # find object's position and visualize
-                        self.label_vis.text = self.scan.tsdf_vol.class_label
-                        self.label_vis.pos = mean_pose
-                        self.label_vis.font_size = int(40)
+                            # find object's position and visualize
+                            self.label_vis.text = self.scan.tsdf_vol.class_label
+                            self.label_vis.pos = mean_pose
+                            self.label_vis.font_size = int(40)
 
-                        self.prev_R = R_
-                        self.prev_t = self.scan.tsdf_vol.camera_3D_pose
                     else:
                         if (len(self.label_vis.text) != 0):
                             pos = self.label_vis.pos
@@ -401,8 +402,6 @@ class ScannetVis(QWidget):
                                                                         self.scan.tsdf_vol.camera_3D_pose, rot_90_x)
                             self.label_vis.update()
 
-                        self.prev_R = R_
-                        self.prev_t = self.scan.tsdf_vol.camera_3D_pose
 
                     self.cam_frustum = np.array(self.scan.tsdf_vol.cam_frustum)
                     self.cam_frustum = self.cam_frustum - self.scan.tsdf_vol.camera_3D_pose

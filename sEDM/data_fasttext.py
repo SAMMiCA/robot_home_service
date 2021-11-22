@@ -7,9 +7,11 @@ from sklearn.preprocessing import StandardScaler
 import re
 import pickle
 import numpy as np
+import os
+from pathlib import Path
 
-train_file = open("train_unique_data.pkl", "rb")
-test_file = open("test_unique_data.pkl", "rb")
+train_file = open(os.path.join(os.path.abspath(os.path.dirname(Path(__file__))), "train_unique_data.pkl"), "rb")
+test_file = open(os.path.join(os.path.abspath(os.path.dirname(Path(__file__))), "test_unique_data.pkl"), "rb")
 data_dict_train = pickle.load(train_file)
 data_dict_test = pickle.load(test_file)
 

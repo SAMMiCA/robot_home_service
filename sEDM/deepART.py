@@ -1,5 +1,5 @@
 import numpy as np
-from utils import fuzzy_and, fuzzy_or
+from sEDM.utils import fuzzy_and, fuzzy_or
 
 
 class deepART(object):

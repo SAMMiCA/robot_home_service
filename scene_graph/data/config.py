@@ -1,4 +1,5 @@
 from ..backbone import ResNetBackbone, VGGBackbone, ResNetBackboneGN, DarkNetBackbone
+from env.constants import PICKUPABLE_OBJECTS, RECEPTACLE_OBJECTS
 from math import sqrt
 import torch
 
@@ -175,7 +176,17 @@ pascal_sbd_dataset = dataset_base.copy({
 })
 
 
+robot_home_service_dataset = dataset_base.copy({
+    'name': 'Robot Home Service Dataset',
 
+    'train_images': './data_detector',
+    'valid_images': './data_detector',
+
+    'train_info': './data_detector/anno_train.json',
+    'valid_info': './data_detector/anno_val.json',
+
+    'class_names': list(sorted(PICKUPABLE_OBJECTS + RECEPTACLE_OBJECTS)),
+})
 
 
 # ----------------------- TRANSFORMS ----------------------- #

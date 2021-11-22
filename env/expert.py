@@ -2,6 +2,8 @@
 
 import copy
 import random
+from networkx.algorithms.shortest_paths.generic import shortest_path
+import numpy as np
 from collections import defaultdict
 from typing import (
     Dict,
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
     from env.tasks import HomeServiceSimplePickAndPlaceTask, HomeServiceBaseTask
 
 AgentLocKeyType = Tuple[float, float, int, int]
+PositionKeyType = Tuple[float, float, float]
 
 
 # class ExplorerTHOR:
@@ -93,6 +96,7 @@ class ShortestPathNavigatorTHOR:
         self.controller = controller
 
         self._include_move_left_right = include_move_left_right
+        self._position_to_object_id: Dict[PositionKeyType, str] = {}
 
     @lazy_property
     def nav_actions_set(self) -> frozenset:
@@ -127,6 +131,7 @@ class ShortestPathNavigatorTHOR:
         """Function that must be called whenever the AI2-THOR controller is
         reset."""
         self._current_scene = None
+        self._position_to_object_id = {}
 
     @property
     def graph(self) -> nx.DiGraph:
@@ -860,7 +865,7 @@ class SubTaskExpert:
         return self.expert_action_list[-1]
 
     @property
-    def goto_action(self) -> str:
+    def goto_action(self) -> str:        
         if len(self.goto_action_list) > 0:
             return self.goto_action_list.pop()
 
@@ -933,6 +938,34 @@ class SubTaskExpert:
             #TODO
             pass
 
+    def _expert_goto_action_to_scene_type(
+        self,
+        scene_type: str
+    ) -> Optional[str]:
+        if len(self.goto_action_list) == 0:
+            if not self.task._1st_check:
+                for _ in range(4):
+                    self.goto_action_list.append("RotateRight")
+                self.task._1st_check = True
+            else:
+                if not self.task._took_goto_action:
+                    self.goto_action_list.append(f"Goto{scene_type}")
+                elif not self.task._2nd_check:
+                    for _ in range(4):
+                        self.goto_action_list.append("RotateRight")
+                    self.task._2nd_check = True
+
+        goto_action = self.goto_action
+        if len(self.goto_action_list) == 0:
+            if self.task._2nd_check:
+                self.task._check_goto_done = True
+            elif self.task._1st_check and (
+                SCENE_TO_SCENE_TYPE[self.task.env.scene] == scene_type
+            ):
+                self.task._check_goto_done = True
+        
+        return goto_action
+
     def _expert_nav_action_to_obj(
         self,
         obj: Dict[str, Any]
@@ -948,6 +981,8 @@ class SubTaskExpert:
         ]
 
         if len(target_keys) == 0:
+            print(f'No target keys')
+            import pdb; pdb.set_trace()
             return None
 
         source_state_key = shortest_path_navigator.get_key(env.get_agent_location())
@@ -959,6 +994,7 @@ class SubTaskExpert:
                     source_state_key=source_state_key, goal_state_keys=target_keys,
                 )
             except nx.NetworkXNoPath as _:
+                print('h?')
                 return None
 
         if action != "Pass":
@@ -976,6 +1012,63 @@ class SubTaskExpert:
                             return "Pass"
         
         return None
+
+    def _expert_nav_action_to_position(self, position) -> Optional[str]:
+        """Get the shortest path navigational action towards the certain position
+
+        """
+        env: HomeServiceTHOREnvironment = self.task.env
+        shortest_path_navigator = self.shortest_path_navigator
+
+        if isinstance(position, np.ndarray):
+            position_key = (round(position[0], 2), round(position[1], 2), round(position[2], 2))
+            position = dict(
+                x=position[0],
+                y=position[1],
+                z=position[2],
+            )
+        elif isinstance(position, dict):
+            position_key = (round(position['x'], 2), round(position['y'], 2), round(position['z'], 2))
+        
+        if position_key not in shortest_path_navigator._position_to_object_id:
+            # Spawn the TargetCircle and place it on the position
+            event = env.controller.step("SpawnTargetCircle", anywhere=True)
+            assert event.metadata["lastActionSuccess"]
+            id_target_circle = event.metadata["actionReturn"]
+
+
+            event = env.controller.step(
+                "TeleportObject", 
+                objectId=id_target_circle, 
+                position=position, 
+                rotation=0, 
+                forceAction=True
+            )
+            assert event.metadata["lastActionSuccess"]
+            
+            # To change objectId for former target circle
+            event = env.controller.step("SpawnTargetCircle", anywhere=True)
+            assert event.metadata["lastActionSuccess"]
+            id_target_circle = event.metadata["actionReturn"]
+
+            event = env.controller.step("RemoveFromScene", objectId=id_target_circle)
+            assert event.metadata["lastActionSuccess"]
+
+            # check
+            target_circle_after_teleport = next(
+                obj for obj in env.last_event.metadata['objects']
+                if obj['objectType'] == "TargetCircle" and obj["position"] == position
+
+            )
+            assert target_circle_after_teleport is not None
+            shortest_path_navigator._position_to_object_id[position_key] = target_circle_after_teleport['objectId']
+
+        object_id = shortest_path_navigator._position_to_object_id[position_key]
+        obj = next(
+            obj for obj in env.last_event.metadata['objects']
+            if obj['objectId'] == object_id
+        )
+        return self._expert_nav_action_to_obj(obj=obj)
 
     def _invalidate_interactable_loc_for_pose(
         self, 
@@ -1051,12 +1144,22 @@ class SubTaskExpert:
             return dict(action="Done")
 
         elif subtask_action == "Goto":
-            return dict(action="Goto", sceneType=subtask_target)
+            expert_goto_action = self._expert_goto_action_to_scene_type(
+                scene_type=subtask_target
+            )
+            if expert_goto_action is None:
+                raise RuntimeError
+            
+            return dict(action=expert_goto_action)
 
         elif subtask_action == "Scan":
-            pass
+            # TODO
+            
+            # return dict(action="HEHEE")
+            return dict(action="Pass")
 
         elif subtask_action == "Navigate":
+            # from metadata
             with include_object_data(env.controller):
                 current_objects = env.last_event.metadata["objects"]
 
@@ -1068,8 +1171,11 @@ class SubTaskExpert:
                     )
             assert target_obj is not None
             self._last_to_interact_object_pose = target_obj
-            expert_nav_action = self._expert_nav_action_to_obj(
-                obj=target_obj
+            # expert_nav_action = self._expert_nav_action_to_obj(
+            #     obj=target_obj
+            # )
+            expert_nav_action = self._expert_nav_action_to_position(
+                position=self.task.target_positions[subtask_target]
             )
 
             if expert_nav_action is None:

@@ -68,9 +68,9 @@ class Scan:
         self.depth_im = depth_image
         frame = torch.from_numpy(rgb_image).cuda().float()
         batch = FastBaseTransform()(frame.unsqueeze(0))
-        preds = self.mask_net(batch)
+        with torch.no_grad():
+            preds = self.mask_net(batch)
         self.preds = preds
-
         self.masks, self.masks_color, self.text_str = None, None, None
         img_numpy = self.prep_display(preds, frame, None, None, undo_transform=False)
         self.masked_img = img_numpy
@@ -94,8 +94,8 @@ class Scan:
                 self.vol_bnds[:, 0] = np.minimum(self.vol_bnds[:, 0], np.amin(view_frust_pts, axis=1))
                 self.vol_bnds[:, 1] = np.maximum(self.vol_bnds[:, 1], np.amax(view_frust_pts, axis=1))
                 
-                print(f'self.view_frust_pts: {self.view_frust_pts}')
-                print(f'self.vol_bnds: {self.vol_bnds}')
+                # print(f'self.view_frust_pts: {self.view_frust_pts}')
+                # print(f'self.vol_bnds: {self.vol_bnds}')
 
                 if (self.vol_bnds_created):
                     self.tsdf_vol.update(self.vol_bnds, self.prev_vol_bnds, self.vol_min, self.vol_max)
@@ -251,7 +251,7 @@ class Scan:
             self.img_gpu = img_gpu
 
         if self.args.display_fps:
-                # Draw the box for the fps on the GPU
+            # Draw the box for the fps on the GPU
             font_face = cv2.FONT_HERSHEY_DUPLEX
             font_scale = 0.6
             font_thickness = 1

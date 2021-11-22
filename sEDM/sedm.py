@@ -1,5 +1,5 @@
-from em_drn import EM_DRN, EM_DRN_recipe, EM_sDRN, EM_sDRN_recipe
-from edmap import EDMAP
+from sEDM.em_drn import EM_DRN, EM_DRN_recipe, EM_sDRN, EM_sDRN_recipe
+from sEDM.edmap import EDMAP
 import numpy as np
 import pickle
 

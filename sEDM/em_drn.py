@@ -1,8 +1,8 @@
-from deepART import deepART
-from DRN import DRN
-from SDRN import sDRN
 import numpy as np
-from data_fasttext import new_ft_dict
+from sEDM.deepART import deepART
+from sEDM.DRN import DRN
+from sEDM.SDRN import sDRN
+from sEDM.data_fasttext import new_ft_dict
 
 
 class EM_DRN(object):
