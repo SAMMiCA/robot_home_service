@@ -263,7 +263,11 @@ class RelativePositionChangeSensor(
         if task.is_done():
             self.should_init = True
 
-        if task.num_steps_taken() == 0 and self.should_init:
+        if task.require_init_position_sensor:
+            self.should_init = True
+            task.require_init_position_sensor = False
+
+        if task.num_steps_taken() == 0 or self.should_init:
             self.last_xzr = np.array([p["x"], p["z"], r % 360])
             self.last_xzr[:2] = np.round(self.last_xzr[:2], 2)
             self.last_xzr[-1] = round_to_factor(self.last_xzr[-1] % 360, self.base)
@@ -285,6 +289,7 @@ class RelativePositionChangeSensor(
         agent_locs = np.append(cum_dx_dz_dr, std_hz)
 
         to_return = {"last_allocentric_position": self.last_xzr.astype(np.float32),
+                     "allocentric_position": current_xzr.astype(np.float32),
                      "last_dx_dz_dr":last_dx_dz_dr.astype(np.float32),
                      "cum_dx_dz_dr": cum_dx_dz_dr.astype(np.float32),
                      "dx_dz_dr": dx_dz_dr.astype(np.float32),

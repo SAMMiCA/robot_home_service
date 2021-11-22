@@ -137,11 +137,11 @@ for i in range(200):
     print(f'{i}-th task')
     # task = task_sampler.next_task(pickup_target="Fork", place_target="DiningTable")
     task = task_sampler.next_task()
-
+    obs = task.get_observations()
     t_frames = None
     init_scan = False
     while not task.is_done():
-        obs = task.get_observations()
+        
         subtask_type = obs['subtask']['type']
         manual = False
         if subtask_type == 1:
@@ -162,37 +162,37 @@ for i in range(200):
                 t_frames = torch.cat([t_frames, t_frame.unsqueeze(0)], dim=0)
         elif subtask_type == 2:
             # SCAN
-            # manual = True
-            # if not init_scan:
-            #     scan = Scan(cam_intr=np.eye(3), mesh_plot=mesh_plot, scannet_data=scannet_data, mask_net=net, args=args, root_path=root_path, use_gpu=use_gpu)
-            #     vis = ScannetVis(scan=scan, task=task, offset=0, skip_im=skip_imgs, mesh_plot=mesh_plot, parent=None)
-            #     init_scan = True
-            # else:
-            #     vis.update_scan()
-            # # action_ind = random.randint(1, 7)
-            # import pdb; pdb.set_trace()
-            # action_ind = int(input('test: '))
+            manual = True
+            if not init_scan:
+                scan = Scan(cam_intr=np.eye(3), mesh_plot=mesh_plot, scannet_data=scannet_data, mask_net=net, args=args, root_path=root_path, use_gpu=use_gpu)
+                vis = ScannetVis(scan=scan, task=task, offset=0, skip_im=skip_imgs, mesh_plot=mesh_plot, parent=None)
+                init_scan = True
+            else:
+                vis.update_scan()
+            # action_ind = random.randint(1, 7)
+            import pdb; pdb.set_trace()
+            action_ind = int(input('test: '))
             # Update SCAN Result from metadata
-            objs = task.env.last_event.metadata['objects']
-            target_obj = next(
-                (
-                    obj for obj in objs
-                    if obj['objectType'] == task.env.current_task_spec.pickup_object
-                ), None
-            )
-            assert target_obj is not None
-            place_receptacles = [
-                obj for obj in objs
-                if obj['objectType'] == task.env.current_task_spec.place_receptacle
-            ]
-            assert len(place_receptacles) > 0
+            # objs = task.env.last_event.metadata['objects']
+            # target_obj = next(
+            #     (
+            #         obj for obj in objs
+            #         if obj['objectType'] == task.env.current_task_spec.pickup_object
+            #     ), None
+            # )
+            # assert target_obj is not None
+            # place_receptacles = [
+            #     obj for obj in objs
+            #     if obj['objectType'] == task.env.current_task_spec.place_receptacle
+            # ]
+            # assert len(place_receptacles) > 0
 
-            task.target_positions = {
-                task.env.current_task_spec.pickup_object: target_obj["axisAlignedBoundingBox"]["center"],
-                task.env.current_task_spec.place_receptacle: place_receptacles[0]["axisAlignedBoundingBox"]["center"]
-            }
-            task._subtask_step += 1
-            continue
+            # task.target_positions = {
+            #     task.env.current_task_spec.pickup_object: target_obj["axisAlignedBoundingBox"]["center"],
+            #     task.env.current_task_spec.place_receptacle: place_receptacles[0]["axisAlignedBoundingBox"]["center"]
+            # }
+            # task._subtask_step += 1
+            # continue
 
         # ax.imshow((obs['rgb'] * 255).astype(np.uint8))
         # plt.draw()
@@ -201,6 +201,7 @@ for i in range(200):
         if not manual:
             action_ind, _ = task.query_expert()
         step_result = task.step(action=action_ind)
+        obs = step_result.observation
         if step_result.info['action_name'] == "done":
             import pdb; pdb.set_trace()
             success += 1

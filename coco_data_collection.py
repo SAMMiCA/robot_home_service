@@ -187,7 +187,7 @@ if __name__ == "__main__":
                         bbox=[x_min, y_min, x_max-x_min, y_max-y_min],
                         area=area,
                         segmentation=poly,
-                        idcrowd=0
+                        iscrowd=0
                     )
                     annotations[path_idx].extend([data_anno])
                     coco_id += 1

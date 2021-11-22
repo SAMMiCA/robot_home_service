@@ -103,6 +103,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         self._check_goto_done: bool = False
         self._1st_check: bool = False
         self._2nd_check: bool = False
+        self._init_position_change_sensor: bool = False
 
         self._target_positions: Dict[str, np.array] = {}
         self._target_visibles: Dict[str, bool] = {}
@@ -113,6 +114,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         self.greedy_expert = None
         self._subtask_step = 0
         self._planned_task = None
+        self._obs = None
 
         self.actions_taken = []
         self.actions_taken_success = []
@@ -142,6 +144,14 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
     def target_visibles(self, vis_dict: Dict[str, bool]):
         for k, v in vis_dict.items():
             self._target_visibles[k] = v
+
+    @property
+    def require_init_position_sensor(self) -> bool:
+        return self._init_position_change_sensor
+
+    @require_init_position_sensor.setter
+    def require_init_position_sensor(self, val: bool):
+        self._init_position_change_sensor = val
 
     # @place_position.setter
     # def place_position(self, position: Optional[Union[np.ndarray, dict]]):
@@ -238,6 +248,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
             ) and self._check_goto_done:
                 self._subtask_step += 1
                 self._check_goto_done = False
+                self.require_init_position_sensor = True
                 return True
         
         elif subtask_action == "Scan":
@@ -293,7 +304,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         """
         action: is the index of the action from self.action_names()
         """
-        obs = [self.get_observations()]
+        obs = [self._obs]
         action_name = self.action_names()[action]
 
         if action_name.startswith("pickup"):
@@ -548,13 +559,14 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
             self.agent_locs.appned(self.env.get_agent_location())
         
         subtask_done = self.is_current_subtask_done()
+        next_obs = self.get_observations()
 
         return RLStepResult(
             observation=None,
             reward=self._judge(
                 obs=obs[0],
                 action=action,
-                next_obs=self.get_observations(),
+                next_obs=next_obs,
                 action_success=action_success,
                 subtask_done=subtask_done
             ),
@@ -569,7 +581,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
                 action_taken=action, action_success=step_result.info["action_success"]
             )
         step_result = RLStepResult(
-            observation=self.get_observations(),
+            observation=self._obs,
             reward=step_result.reward,
             done=step_result.done,
             info=step_result.info,
