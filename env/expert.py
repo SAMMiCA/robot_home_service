@@ -1298,7 +1298,7 @@ class SubTaskExpert:
                     target_obj = next(
                         (o for o in current_objects if o['objectType'] == subtask_target), None
                     )
-            assert target_obj is not None and target_obj['visible']
+            # assert target_obj is not None and target_obj['visible']
             self._last_to_interact_object_pose = target_obj
             # return dict(action="Pickup", objectType=target_obj["objectType"])
             return dict(action="Pickup")
@@ -1320,7 +1320,7 @@ class SubTaskExpert:
                         (o for o in current_objects if o['objectType'] == subtask_place), None
                     )
             assert target_obj is not None and held_object["objectId"] == target_obj["objectId"]
-            assert place_obj is not None and place_obj["visible"]
+            # assert place_obj is not None and place_obj["visible"]
             self._last_to_interact_object_pose = place_obj
             # return dict(action="PutByType", objectType=place_obj["objectType"])
             return dict(action="Put")

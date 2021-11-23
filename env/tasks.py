@@ -306,7 +306,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         """
         action: is the index of the action from self.action_names()
         """
-        obs = [self._obs]
+        # obs = [self._obs]
         action_name = self.action_names()[action]
 
         # if action_name.startswith("pickup_"):
@@ -559,42 +559,42 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
             pass
 
         elif action_name.startswith(("move", "rotate")):
-            opposites = {
-                "ahead": "back",
-                "back": "ahead",
-                "right": "left",
-                "left": "right",
-            }
-            direction = action_name.split("_")[-1]
-            opposite_direction = opposites[direction]
-            for i in range(self.smoothing_factor):
-                action_success = getattr(self.env, action_name)()
+            # opposites = {
+            #     "ahead": "back",
+            #     "back": "ahead",
+            #     "right": "left",
+            #     "left": "right",
+            # }
+            # direction = action_name.split("_")[-1]
+            # opposite_direction = opposites[direction]
+            # for i in range(self.smoothing_factor):
+            action_success = getattr(self.env, action_name)()
                 # obs.append(self.get_observations())
 
-                if not action_success:
-                    # obs.pop()
-                    for j in range(i):
-                        getattr(self.env, "_".join([action_name.split("_")[0], opposite_direction]))()
-                        # obs.pop()
-                    break
+                # if not action_success:
+                #     # obs.pop()
+                #     for j in range(i):
+                #         getattr(self.env, "_".join([action_name.split("_")[0], opposite_direction]))()
+                #         # obs.pop()
+                #     break
         
         elif action_name.startswith("look"):
-            opposites = {
-                "up": "down",
-                "down": "up",
-            }
-            direction = action_name.split("_")[-1]
-            opposite_direction = opposites[direction]
-            for i in range(self.smoothing_factor):
-                action_success = getattr(self.env, action_name)(1.0 / self.smoothing_factor)
+            # opposites = {
+            #     "up": "down",
+            #     "down": "up",
+            # }
+            # direction = action_name.split("_")[-1]
+            # opposite_direction = opposites[direction]
+            # for i in range(self.smoothing_factor):
+            action_success = getattr(self.env, action_name)(1.0 / self.smoothing_factor)
                 # obs.append(self.get_observations())
 
-                if not action_success:
-                    # obs.pop()
-                    for j in range(i):
-                        getattr(self.env, "_".join([action_name.split("_")[0], opposite_direction]))(1.0 / self.smoothing_factor)
-                        # obs.pop()
-                    break
+                # if not action_success:
+                #     # obs.pop()
+                #     for j in range(i):
+                #         getattr(self.env, "_".join([action_name.split("_")[0], opposite_direction]))(1.0 / self.smoothing_factor)
+                #         # obs.pop()
+                #     break
 
         elif action_name.startswith(("stand", "crouch")):
             action_success = getattr(self.env, action_name)()
@@ -624,17 +624,17 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         self.actions_taken.append(action_name)
         self.actions_taken_success.append(action_success)
         if self.task_spec_in_metrics:
-            self.agent_locs.appned(self.env.get_agent_location())
+            self.agent_locs.append(self.env.get_agent_location())
         
         subtask_done = self.is_current_subtask_done()
-        self._obs = self.get_observations()
+        # self._obs = self.get_observations()
 
         return RLStepResult(
             observation=None,
             reward=self._judge(
-                obs=obs[0],
+                obs=None,
                 action=action,
-                next_obs=self._obs,
+                next_obs=None,
                 action_success=action_success,
                 subtask_done=subtask_done
             ),
@@ -649,7 +649,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
                 action_taken=action, action_success=step_result.info["action_success"]
             )
         step_result = RLStepResult(
-            observation=self._obs,
+            observation=self.get_observations(),
             reward=step_result.reward,
             done=step_result.done,
             info=step_result.info,
@@ -760,14 +760,14 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
                 if obj["objectType"] == pickup_object
             ), None
         )
-        assert target_object is not None
+        # assert target_object is not None
 
         if place_receptacle != "User":
             possible_place_objects = [
                 obj for obj in env.last_event.metadata["objects"]
                 if obj["objectType"] == place_receptacle
             ]
-            assert len(possible_place_objects) > 0
+            # assert len(possible_place_objects) > 0
 
         # receptacle = None
         # if target_object["parentReceptacles"] is not None:
@@ -778,10 +778,6 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
         #         ), None
         #     )
         
-        print(f"self.actions_taken: {self.actions_taken}")
-        print(f"len(self.actions_taken): {len(self.actions_taken)}")
-        print(f"self.greedy_expert.expert_action_list: {self.greedy_expert.expert_action_list}")
-        print(f"len(self.greedy_expert.expert_action_list): {len(self.greedy_expert.expert_action_list)}")
         metrics = {
             **super().metrics(),
             **{

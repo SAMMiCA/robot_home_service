@@ -624,6 +624,7 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
         return dict(
             force_cache_reset=False,
             epochs=float("inf"),
+            task_spec_in_metrics=True,
             **cls.stagewise_task_sampler_args(
                 stage="train_seen",
                 process_ind=process_ind,

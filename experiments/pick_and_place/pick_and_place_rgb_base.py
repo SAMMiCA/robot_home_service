@@ -98,6 +98,8 @@ class PickAndPlaceRGBBaseExperimentConfig(HomeServiceBaseExperimentConfig):
     ) -> HomeServiceTaskSampler:
         if "task_type" in init_kwargs:
             del init_kwargs["task_type"]
+        if "force_cache_reset" in init_kwargs:
+            del init_kwargs["force_cache_reset"]
 
         return super().make_sampler_fn(
             task_type=HomeServiceTaskType.SIMPLE_PICK_AND_PLACE,

@@ -72,7 +72,7 @@ class HomeServiceActorCriticSimpleConvRNN(ActorCriticModel[CategoricalDistr]):
         self.rel_position_change_uuid = rel_position_change_uuid
 
         self.task_type_embedder = nn.Embedding(
-            num_embeddings=7, embedding_dim=task_type_embedding_dim
+            num_embeddings=8, embedding_dim=task_type_embedding_dim
         )
         self.object_type_embedder = nn.Embedding(
             num_embeddings=len(ordered_object_types) + 1, embedding_dim=object_type_embedding_dim,
@@ -222,34 +222,14 @@ class HomeServiceResNetActorCriticRNN(HomeServiceActorCriticSimpleConvRNN):
             .mean(-1)
         )
         vis_x = vis_x.view(*batch_shape, -1)
-        # print(f'vis_x.shape: {vis_x.shape}')
-        # print(f'vis_x.dtype: {vis_x.dtype}')
 
         subtask = observations[self.subtask_uuid]
         task_type_x = self.task_type_embedder(subtask['type'])
-        # print(f'subtask["task"]: {subtask["type"]}')
-        # print(f'task_type_x.shape: {task_type_x.shape}')
-        # print(f'task_type_x.dtype: {task_type_x.dtype}')
         target_type_x = self.object_type_embedder(subtask['target_type'])
-        # print(f'subtask["target_type"]: {subtask["target_type"]}')
-        # print(f'target_type_x.shape: {target_type_x.shape}')
-        # print(f'target_type_x.dtype: {target_type_x.dtype}')
         target_visible_x = self.object_visible_embedder(subtask['target_visible'])
-        # print(f'subtask["target_visible"]: {subtask["target_visible"]}')
-        # print(f'target_visible_x.shape: {target_visible_x.shape}')
-        # print(f'target_visible_x.dtype: {target_visible_x.dtype}')
         place_type_x = self.object_type_embedder(subtask['place_type'])
-        # print(f'subtask["place_type"]: {subtask["place_type"]}')
-        # print(f'place_type_x.shape: {place_type_x.shape}')
-        # print(f'place_type_x.dtype: {place_type_x.dtype}')
         place_visible_x = self.object_visible_embedder(subtask['place_visible'])
-        # print(f'subtask["place_visible"]: {subtask["place_visible"]}')
-        # print(f'place_visible_x.shape: {place_visible_x.shape}')
-        # print(f'place_visible_x.dtype: {place_visible_x.dtype}')
         position_x = torch.cat([observations['rel_position_change']['agent_locs'], subtask['target_position'], subtask['place_position']], -1)
-        # print(f'poisition_x: {position_x}')
-        # print(f'poisition_x.shape: {position_x.shape}')
-        # print(f'poisition_x.dtype: {position_x.dtype}')
         position_x = self.position_encoder(position_x)
         x = torch.cat([vis_x, task_type_x, target_type_x, target_visible_x, place_type_x, place_visible_x, position_x], -1)
         # print(f'x.shape: {x.shape}')
