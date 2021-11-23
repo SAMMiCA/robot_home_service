@@ -3,7 +3,7 @@ from collections import defaultdict
 from typing import List, Dict, Set, Optional, Any
 
 from ai2thor.controller import Controller
-from datagen.datagen_constants import OBJECTS_FOR_TEST, TASK_ORDERS
+from datagen.datagen_constants import PICKUP_OBJECTS_FOR_TEST, TASK_ORDERS
 
 from env.constants import SCENE_TYPE_TO_SCENES
 
@@ -156,9 +156,9 @@ def get_task_keys(stage: str) -> List[str]:
                 if task_order["targetReceptacleType"] != "User" else
                 f'Bring_Me_{pickup_object_type}_On_{task_order["startReceptacleType"]}'
             )
-            if stage == "test" and pickup_object_type in OBJECTS_FOR_TEST:
+            if stage == "test" and pickup_object_type in PICKUP_OBJECTS_FOR_TEST:
                 task_keys.append(task_key)
-            elif stage == "train" and pickup_object_type not in OBJECTS_FOR_TEST:
+            elif stage == "train" and pickup_object_type not in PICKUP_OBJECTS_FOR_TEST:
                 task_keys.append(task_key)
             elif stage == "all":
                 task_keys.append(task_key)

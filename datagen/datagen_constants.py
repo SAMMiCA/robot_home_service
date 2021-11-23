@@ -428,4 +428,6 @@ TASK_ORDERS = [
     },
 ]
 
-OBJECTS_FOR_TEST = ["Plate", "Mug", "Pot", "Potato", "WineBottle", "CellPhone"]
+PICKUP_OBJECTS_FOR_TRAIN = ["Bowl", "Cup", "Kettle", "Pan", "Tomato", "Bottle", "Box", "Laptop", "RemoteControl", "Newspaper", "TissueBox", "ToiletPaper"]
+PICKUP_OBJECTS_FOR_TEST = ["Plate", "Mug", "Pot", "Potato", "WineBottle", "CellPhone"]
+RECEP_OBJECTS = ["SinkBasin", "CounterTop", "DiningTable", "Cabinet", "Microwave", "CoffeeMachine", "StoveBurner", "Fridge", "GarbageCan", "Chair", "CoffeeTable", "SideTable", "Sofa", "Bed", "Desk", "Sink", "Toilet", "ToiletPaperHanger"]

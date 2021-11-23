@@ -20,7 +20,7 @@ except ImportError:
 
 from allenact.embodiedai.sensors.vision_sensors import DepthSensor
 from allenact.utils.misc_utils import prepare_locals_for_super
-from allenact_plugins.ithor_plugin.ithor_util import round_to_factor
+from allenact_plugins.ithor_plugin.ithor_util import include_object_data, round_to_factor
 
 from env.constants import SCENE_TO_SCENE_TYPE, SCENE_TYPE_TO_LABEL, STEP_SIZE
 from env.environment import HomeServiceTHOREnvironment
@@ -312,7 +312,7 @@ class InstanceSegmentationSensor(
         self.ordered_object_types = list(ordered_object_types)
         assert self.ordered_object_types == sorted(self.ordered_object_types)
 
-        self.object_type_to_idn = {ot: i for i, ot in enumerate(self.ordered_object_types)}
+        self.object_type_to_idx = {ot: i for i, ot in enumerate(self.ordered_object_types)}
         self.idn_to_object_type = {i: ot for i, ot in enumerate(self.ordered_object_types)}
 
         observation_space = gym.spaces.Space()
@@ -336,12 +336,30 @@ class InstanceSegmentationSensor(
         det_objs = [obj for obj in e.instance_masks if obj.split('|')[0] in self.ordered_object_types]
         for obj in det_objs:
             obj_type = obj.split("|")[0]
-            obj_type_idx = self.object_type_to_idn[obj_type]
+            obj_type_idx = self.object_type_to_idx[obj_type]
             rgb[e.instance_masks[obj]] = inst_seg_frame[e.instance_masks[obj]]
             inst_label.append(obj_type_idx)
             inst_mask.append(e.instance_masks[obj])
             inst_bbox.append(e.instance_detections2D[obj])
             inst_detected[obj_type_idx] += 1
+            if obj_type in ("Sink", "Bathtub"):
+                add_ = True
+                with include_object_data(env.controller):
+                    objs = env.last_event.metadata["objects"]
+                    basin_obj = next(
+                        (
+                            obj for obj in objs
+                            if obj["objectType"] == f"{obj_type}Basin"
+                        ), None
+                    )
+                    if basin_obj is None:
+                        add_ = False
+                if add_:
+                    obj_type_idx = self.object_type_to_idx[obj_type + "Basin"]
+                    inst_label.append(obj_type_idx)
+                    inst_mask.append(e.instance_masks[obj])
+                    inst_bbox.append(e.instance_detections2D[obj])
+                    inst_detected[obj_type_idx] += 1
 
         return {
             'inst_seg_image': inst_seg_frame,

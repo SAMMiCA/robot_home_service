@@ -22,7 +22,7 @@ from allenact_plugins.ithor_plugin.ithor_util import (
     round_to_factor,
     include_object_data,
 )
-from datagen.datagen_constants import OBJECTS_FOR_TEST
+from datagen.datagen_constants import PICKUP_OBJECTS_FOR_TEST
 # from datagen.datagen_constants import OBJECT_TYPES_TO_NOT_MOVE
 from datagen.datagen_utils import (
     open_objs,
@@ -773,17 +773,28 @@ class HomeServiceTHOREnvironment:
                 )
                 assert self.controller.last_event.metadata["lastActionSuccess"]
                 
-                if self.current_task_spec.stage.startswith("train"):
-                    obj_ids_to_remove = [
-                        obj["objectId"] for obj in self.last_event.metadata["objects"]
-                        if obj["objectType"] in OBJECTS_FOR_TEST
-                    ]
+        if self.current_task_spec.stage.startswith("train"):
+            with include_object_data(self.controller):
+                obj_id_to_remove = next(
+                    (
+                        obj["objectId"] 
+                        for obj in self.last_event.metadata["objects"]
+                        if obj["objectType"] in PICKUP_OBJECTS_FOR_TEST
+                    ), None                        
+                )
+                while obj_id_to_remove is not None:
                     self.controller.step(
-                        "RemoveObjsFromScene",
-                        objectIds=obj_ids_to_remove
+                        "RemoveFromScene",
+                        objectId=obj_id_to_remove
                     )
                     assert self.controller.last_event.metadata["lastActionSuccess"]
-                    
+                    obj_id_to_remove = next(
+                        (
+                            obj["objectId"] 
+                            for obj in self.last_event.metadata["objects"]
+                            if obj["objectType"] in PICKUP_OBJECTS_FOR_TEST
+                        ), None                        
+                    )
 
     def reset(
         self, task_spec: HomeServiceTaskSpec, force_axis_aligned_start: bool = False, scene_type: str = None,
