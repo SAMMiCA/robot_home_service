@@ -1,4 +1,7 @@
 import random
+from tqdm import tqdm
+import time
+from datetime import timedelta
 import os
 import sys
 import pickle
@@ -10,6 +13,7 @@ import torch.backends.cudnn as cudnn
 from torchvision.transforms import Compose, Normalize, Resize, ToTensor
 from PIL import Image
 
+from allenact.utils.system import get_logger
 from env.tasks import HomeServiceTaskSampler, HomeServiceTaskType
 from experiments.home_service_base import HomeServiceBaseExperimentConfig
 from room_change.utils import set_model
@@ -30,6 +34,7 @@ from scene_graph.test_scan import Scan
 from scene_graph.test_visualize import ScannetVis
 from allenact.embodiedai.mapping.mapping_utils.point_cloud_utils import depth_frame_to_camera_space_xyz
 
+# python scenario2.py --trained_model=scene_graph/weights/yolact_base_357_200000.pth --score_threshold=0.7 --dataset=robot_home_service_dataset
 room_ind_to_type = {
     0: "Kitchen",
     1: "Living Room",
@@ -95,7 +100,9 @@ skip_imgs = 1
 app = QApplication(sys.argv)
 
 task_sampler_params = HomeServiceBaseExperimentConfig.stagewise_task_sampler_args(
-    stage="train_seen", process_ind=0, total_processes=1, headless=False, allowed_scene_inds=[1]
+    stage="train_unseen", process_ind=0, total_processes=1, headless=False, 
+    # allowed_scene_inds=range(29, 31),
+    # allowed_target_receps=["User"]
 )
 task_sampler: HomeServiceTaskSampler = HomeServiceBaseExperimentConfig.make_sampler_fn(
     **task_sampler_params,
@@ -130,18 +137,18 @@ rc_transform = Compose(
 # ax = fig.add_subplot(111)
 # plt.ion()
 # plt.show()
-num_tasks = 200
+num_tasks = task_sampler.total_unique
+print(f'total {num_tasks} tasks')
 success = 0
 
-for i in range(200):
+st = time.time()
+for i in range(num_tasks):
     print(f'{i}-th task')
-    # task = task_sampler.next_task(pickup_target="Fork", place_target="DiningTable")
     task = task_sampler.next_task()
     obs = task.get_observations()
     t_frames = None
     init_scan = False
     while not task.is_done():
-        
         subtask_type = obs['subtask']['type']
         manual = False
         if subtask_type == 1:
@@ -160,39 +167,48 @@ for i in range(200):
                         print(f'Agent has arrived to the correct room to conduct the task')
             else:
                 t_frames = torch.cat([t_frames, t_frame.unsqueeze(0)], dim=0)
+
         elif subtask_type == 2:
             # SCAN
-            manual = True
-            if not init_scan:
-                scan = Scan(cam_intr=np.eye(3), mesh_plot=mesh_plot, scannet_data=scannet_data, mask_net=net, args=args, root_path=root_path, use_gpu=use_gpu)
-                vis = ScannetVis(scan=scan, task=task, offset=0, skip_im=skip_imgs, mesh_plot=mesh_plot, parent=None)
-                init_scan = True
-            else:
-                vis.update_scan()
+            # manual = True
+            # if not init_scan:
+            #     scan = Scan(cam_intr=np.eye(3), mesh_plot=mesh_plot, scannet_data=scannet_data, mask_net=net, args=args, root_path=root_path, use_gpu=use_gpu)
+            #     vis = ScannetVis(scan=scan, task=task, offset=0, skip_im=skip_imgs, mesh_plot=mesh_plot, parent=None)
+            #     init_scan = True
+            # else:
+            #     vis.update_scan()
             # action_ind = random.randint(1, 7)
-            import pdb; pdb.set_trace()
-            action_ind = int(input('test: '))
+            # import pdb; pdb.set_trace()
+            # action_ind = int(input('test: '))
             # Update SCAN Result from metadata
-            # objs = task.env.last_event.metadata['objects']
-            # target_obj = next(
-            #     (
-            #         obj for obj in objs
-            #         if obj['objectType'] == task.env.current_task_spec.pickup_object
-            #     ), None
-            # )
+            objs = task.env.last_event.metadata['objects']
+            target_obj = next(
+                (
+                    obj for obj in objs
+                    if obj['objectType'] == task.env.current_task_spec.pickup_object
+                ), None
+            )
             # assert target_obj is not None
-            # place_receptacles = [
-            #     obj for obj in objs
-            #     if obj['objectType'] == task.env.current_task_spec.place_receptacle
-            # ]
-            # assert len(place_receptacles) > 0
+            if target_obj is None:
+                break
+            
+            place_receptacles = [
+                obj for obj in objs
+                if obj['objectType'] == task.env.current_task_spec.place_receptacle
+            ]
+            if len(place_receptacles) == 0 and task.env.current_task_spec.place_receptacle != "User":
+                break
 
-            # task.target_positions = {
-            #     task.env.current_task_spec.pickup_object: target_obj["axisAlignedBoundingBox"]["center"],
-            #     task.env.current_task_spec.place_receptacle: place_receptacles[0]["axisAlignedBoundingBox"]["center"]
-            # }
-            # task._subtask_step += 1
-            # continue
+            task.target_positions = {
+                task.env.current_task_spec.pickup_object: target_obj["axisAlignedBoundingBox"]["center"],
+                # task.env.current_task_spec.place_receptacle: place_receptacles[0]["axisAlignedBoundingBox"]["center"]
+            }
+            if task.env.current_task_spec.place_receptacle != "User":
+                task.target_positions[task.env.current_task_spec.place_receptacle] = place_receptacles[0]["axisAlignedBoundingBox"]["center"]
+
+            task._subtask_step += 1
+            obs = task.get_observations()
+            continue
 
         # ax.imshow((obs['rgb'] * 255).astype(np.uint8))
         # plt.draw()
@@ -202,14 +218,18 @@ for i in range(200):
             action_ind, _ = task.query_expert()
         step_result = task.step(action=action_ind)
         obs = step_result.observation
-        if step_result.info['action_name'] == "done":
-            import pdb; pdb.set_trace()
-            success += 1
     
-    import pdb; pdb.set_trace()
+    if step_result.info['action_name'] == "done":
+        print(f"{i}-th task success")
+        success += 1
+    else:
+        print(f'{i}-th task failed...')
+        print(f'task: {task_sampler.current_task_spec.metrics}')
 
 task_sampler.close()
+et = time.time()
 
-# print(f'finishied {num_tasks} tasks')
-# print(f'Success {success} out of {num_tasks}')
+print(f'finishied {num_tasks} tasks')
+print(f'Success {success} out of {num_tasks}')
+print(f'Time consumed: {timedelta(seconds=(et - st))}')
 

@@ -157,7 +157,10 @@ class SubtaskHomeServiceSensor(
             # subtask_target_position = np.array(list(subtask_target["position"].values()), dtype=np.float32)
             # subtask_target_visible = subtask_target["visible"] + 1
             subtask_target_type = self.object_type_to_ind[current_subtask_target] + 1 + 4
-            subtask_target_position = task.target_positions[current_subtask_target]
+            if current_subtask_target in task.target_positions:
+                subtask_target_position = task.target_positions[current_subtask_target]
+            else:
+                subtask_target_position = np.zeros(3, dtype=np.float32)
             subtask_target_visible = subtask_target["visible"] + 1 # Should be modified
 
             subtask_place_type = 0
@@ -180,7 +183,10 @@ class SubtaskHomeServiceSensor(
             # subtask_place_type = self.object_type_to_ind[subtask_place['objectType']] + 1
             # subtask_place_position = np.array(list(subtask_place["position"].values()), dtype=np.float32)
             subtask_place_type = self.object_type_to_ind[current_subtask_place] + 1 + 4
-            subtask_place_position = task.target_positions[current_subtask_place]
+            if current_subtask_place in task.target_positions:
+                subtask_place_position = task.target_positions[current_subtask_place]
+            else:
+                subtask_target_position = np.zeros(3, dtype=np.float32)
             subtask_place_visible = subtask_place["visible"] + 1 # Should be modified
         else:
             raise RuntimeError()

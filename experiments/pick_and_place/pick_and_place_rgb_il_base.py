@@ -133,7 +133,7 @@ class PickAndPlaceRGBILBaseExperimentConfig(PickAndPlaceRGBBaseExperimentConfig)
 
     @classmethod
     def num_valid_processes(cls) -> int:
-        return 2
+        return 0
 
     @classmethod
     def num_test_processes(cls) -> int:

@@ -28,6 +28,7 @@ from env.baseline_models import HomeServiceActorCriticSimpleConvRNN, HomeService
 
 from env.constants import (
     FOV,
+    LOCAL_EXECUTABLE_PATH,
     PICKUPABLE_OBJECTS,
     OPENABLE_OBJECTS,
     RECEPTACLE_OBJECTS,
@@ -71,6 +72,7 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
         "width": SCREEN_SIZE,
         "height": SCREEN_SIZE,
         "commit_id": THOR_COMMIT_ID,
+        # "local_executable_path": LOCAL_EXECUTABLE_PATH,
         "fastActionEmit": True,
         "renderDepthImage": False,
         "renderSemanticSegmentation": False,
@@ -84,7 +86,7 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
 
     # Training parameters
     TRAINING_STEPS = int(75e6)
-    SAVE_INTERVAL = int(1e6)
+    SAVE_INTERVAL = int(5e4)
     USE_RESNET_CNN = False
 
     # Sensor info
@@ -162,10 +164,14 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
                 "crouch",
                 "look_up",
                 "look_down",
-                *cls.PICKUP_ACTIONS,
-                *cls.OPEN_ACTIONS,
-                *cls.CLOSE_ACTIONS,
-                *cls.PUT_ACTIONS,
+                # *cls.PICKUP_ACTIONS,
+                # *cls.OPEN_ACTIONS,
+                # *cls.CLOSE_ACTIONS,
+                # *cls.PUT_ACTIONS,
+                "pickup",
+                # "open",
+                # "close",
+                "put",                
             )
             + goto_actions
             + pass_actions
@@ -604,6 +610,96 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
         kwargs["sensors"] = sensors
 
         return kwargs
+
+    @classmethod
+    def train_task_sampler_args(
+        cls,
+        process_ind: int,
+        total_processes: int,
+        headless: bool = False,
+        devices: Optional[List[int]] = None,
+        seeds: Optional[List[int]] = None,
+        deterministic_cudnn: bool = False,
+    ):
+        return dict(
+            force_cache_reset=False,
+            epochs=float("inf"),
+            **cls.stagewise_task_sampler_args(
+                stage="train_seen",
+                process_ind=process_ind,
+                total_processes=total_processes,
+                headless=headless,
+                # allowed_pickup_objs=None,
+                # allowed_start_receps=None,
+                # allowed_target_receps=None,
+                # allowed_scene_inds=None,
+                devices=devices,
+                seeds=seeds,
+                deterministic_cudnn=deterministic_cudnn,
+            ),
+        )
+
+    @classmethod
+    def valid_task_sampler_args(
+        cls,
+        process_ind: int,
+        total_processes: int,
+        headless: bool = False,
+        devices: Optional[List[int]] = None,
+        seeds: Optional[List[int]] = None,
+        deterministic_cudnn: bool = False,
+    ):
+        return dict(
+            force_cache_reset=True,
+            epochs=1,
+            **cls.stagewise_task_sampler_args(
+                stage="train_seen",
+                # allowed_pickup_objs=None,
+                # allowed_start_receps=None,
+                # allowed_target_receps=None,
+                allowed_scene_inds=(10, 20),
+                process_ind=process_ind,
+                total_processes=total_processes,
+                headless=headless,
+                devices=devices,
+                seeds=seeds,
+                deterministic_cudnn=deterministic_cudnn,
+            ),
+        )
+
+    @classmethod
+    def test_task_sampler_args(
+        cls,
+        process_ind: int,
+        total_processes: int,
+        headless: bool = False,
+        devices: Optional[List[int]] = None,
+        seeds: Optional[List[int]] = None,
+        deterministic_cudnn: bool = False,
+        task_spec_in_metrics: bool = False,
+    ):
+        task_spec_in_metrics = False
+
+        stage = "train_unseen"
+
+        return dict(
+            force_cache_reset=True,
+            epochs=1,
+            task_spec_in_metrics=task_spec_in_metrics,
+            **cls.stagewise_task_sampler_args(
+                stage=stage,
+                # allowed_pickup_objs=None,
+                # allowed_start_receps=None,
+                # allowed_target_receps=None,
+                # allowed_scene_inds=None,
+                process_ind=process_ind,
+                total_processes=total_processes,
+                headless=headless,
+                devices=devices,
+                seeds=seeds,
+                deterministic_cudnn=deterministic_cudnn,
+            ),
+        )
 
     @classmethod
     @abstractmethod

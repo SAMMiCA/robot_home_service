@@ -2,6 +2,7 @@
 
 import copy
 import random
+import math
 from networkx.algorithms.shortest_paths.generic import shortest_path
 import numpy as np
 from collections import defaultdict
@@ -487,7 +488,10 @@ class GreedySimplePickAndPlaceExpert:
         `self.task.action_names()`. For this action to be available the
         `update` function must be called after every step.
         """
-        assert self.task.num_steps_taken() == len(self.expert_action_list) - 1
+        assert self.task.num_steps_taken() == len(self.expert_action_list) - 1, (
+            f"self.task.num_steps_taken(): {self.task.num_steps_taken()} is not equal to \
+                len(self.expert_action_list) - 1: {len(self.expert_action_list) - 1}"
+        )
         return self.expert_action_list[-1]
 
     def update(self, action_taken: Optional[int], action_success: Optional[bool]):
@@ -861,7 +865,10 @@ class SubTaskExpert:
 
     @property
     def expert_action(self) -> int:
-        assert self.task.num_steps_taken() == len(self.expert_action_list) - 1
+        assert self.task.num_steps_taken() == len(self.expert_action_list) - 1, (
+            f"self.task.num_steps_taken(): {self.task.num_steps_taken()} is not equal to \
+                len(self.expert_action_list) - 1: {len(self.expert_action_list) - 1}"
+        )
         return self.expert_action_list[-1]
 
     @property
@@ -892,11 +899,20 @@ class SubTaskExpert:
                     self.shortest_path_navigator.update_graph_with_failed_action(
                         stringcase.pascalcase(action_str)
                     )
+                # elif (
+                #     "pickup" in action_str
+                #     or "open_by_type" in action_str
+                #     or "close_by_type" in action_str
+                #     or "put_by_type" in action_str
+                # ) and action_taken == last_expert_action:
+                #     assert self._last_to_interact_object_pose is not None
+                #     self._invalidate_interactable_loc_for_pose(
+                #         location=self.task.env.get_agent_location(),
+                #         obj_pose=self._last_to_interact_object_pose,
+                #     )
+                #     self.task.rollback_subtask()
                 elif (
-                    "pickup" in action_str
-                    or "open_by_type" in action_str
-                    or "close_by_type" in action_str
-                    or "put_by_type" in action_str
+                    action_str == "pickup"
                 ) and action_taken == last_expert_action:
                     assert self._last_to_interact_object_pose is not None
                     self._invalidate_interactable_loc_for_pose(
@@ -904,6 +920,17 @@ class SubTaskExpert:
                         obj_pose=self._last_to_interact_object_pose,
                     )
                     self.task.rollback_subtask()
+
+                elif (
+                    action_str == "put"
+                ) and action_taken == last_expert_action:
+                    assert self._last_to_interact_object_pose is not None
+                    self._invalidate_interactable_loc_for_pose(
+                        location=self.task.env.get_agent_location(),
+                        obj_pose=self._last_to_interact_object_pose,
+                    )
+                    self.task.rollback_subtask()
+
                 elif (
                     ("crouch" in action_str or "stand" in action_str) 
                     and action_taken == last_expert_action
@@ -916,12 +943,23 @@ class SubTaskExpert:
                     )
             else:
                 if not was_nav_action:
-                    if (
-                        "pickup" in action_str
-                        or "open_by_type" in action_str
-                        or "close_by_type" in action_str
-                        or "put_by_type" in action_str
-                    ): 
+                    # if (
+                    #     "pickup" in action_str
+                    #     or "open_by_type" in action_str
+                    #     or "close_by_type" in action_str
+                    #     or "put_by_type" in action_str
+                    # ): 
+                    #     self._last_to_interact_object_pose = None
+                    if action_str == "pickup":
+                        held_object = self.task.env.held_object
+                        if held_object is None:
+                            self.task.rollback_subtask()
+                        elif held_object["objectType"] != self._last_to_interact_object_pose["objectType"]:
+                            self.task.rollback_subtask()
+                        else:
+                            self._last_to_interact_object_pose = None
+                    elif action_str == "put":
+                        assert self.task.env.held_object is None
                         self._last_to_interact_object_pose = None
 
         self._generate_and_record_expert_action()
@@ -933,6 +971,7 @@ class SubTaskExpert:
         if self.map_oracle:
             return self.task.env._interactable_positions_cache.get(
                 scene_name=self.task.env.scene, obj=obj, controller=self.task.env.controller,
+                # max_distance=1.0
             )
         else:
             #TODO
@@ -981,9 +1020,8 @@ class SubTaskExpert:
         ]
 
         if len(target_keys) == 0:
-            print(f'No target keys')
-            import pdb; pdb.set_trace()
-            return None
+            # print(f'No target keys')
+            return "Fail"
 
         source_state_key = shortest_path_navigator.get_key(env.get_agent_location())
 
@@ -994,8 +1032,11 @@ class SubTaskExpert:
                     source_state_key=source_state_key, goal_state_keys=target_keys,
                 )
             except nx.NetworkXNoPath as _:
-                print('h?')
-                return None
+                # print(f'No path exists from {source_state_key} to {target_keys}')
+                rand_nav_action = random.choice(["MoveAhead", "RotateRight", "RotateLeft", "LookUp", "LookDown"])
+                # print(f'take random nav action... {rand_nav_action}')
+                # import pdb; pdb.set_trace()
+                return rand_nav_action
 
         if action != "Pass":
             return action
@@ -1054,11 +1095,18 @@ class SubTaskExpert:
             event = env.controller.step("RemoveFromScene", objectId=id_target_circle)
             assert event.metadata["lastActionSuccess"]
 
+            def distance(p1, p2):
+                d = 0
+                for c in ("x", "y", "z"):
+                    d += (p1[c] - p2[c]) ** 2
+                return round(math.sqrt(d), 2)
+                
             # check
             target_circle_after_teleport = next(
-                obj for obj in env.last_event.metadata['objects']
-                if obj['objectType'] == "TargetCircle" and obj["position"] == position
-
+                (
+                    obj for obj in env.last_event.metadata['objects']
+                    if obj['objectType'] == "TargetCircle" and distance(obj["position"], position) < 0.05
+                ), None
             )
             assert target_circle_after_teleport is not None
             shortest_path_navigator._position_to_object_id[position_key] = target_circle_after_teleport['objectId']
@@ -1077,7 +1125,7 @@ class SubTaskExpert:
     ) -> bool:
         """Invalidate a given location in the `interactable_positions_cache` as
         we tried to interact but couldn't."""
-        env = self.task.env
+        env: HomeServiceTHOREnvironment = self.task.env
 
         interactable_positions = env._interactable_positions_cache.get(
             scene_name=env.scene, obj=obj_pose, controller=env.controller
@@ -1102,6 +1150,10 @@ class SubTaskExpert:
             self.expert_action_list
         ), f"{self.task.num_steps_taken()} != {len(self.expert_action_list)}"
         expert_action_dict = self._generate_expert_action_dict()
+
+        if expert_action_dict is None or expert_action_dict["action"] is None:
+            self.expert_action_list.append(None)
+            return          
 
         action_str = stringcase.snakecase(expert_action_dict["action"])
         if action_str not in self.task.action_names():
@@ -1153,9 +1205,32 @@ class SubTaskExpert:
             return dict(action=expert_goto_action)
 
         elif subtask_action == "Scan":
-            # TODO
+            with include_object_data(env.controller):
+                current_objects = env.last_event.metadata["objects"]
+                target_obj = next(
+                    (
+                        obj for obj in current_objects
+                        if obj['objectType'] == env.current_task_spec.pickup_object
+                    ), None
+                )
+                place_receps = None
+                if env.current_task_spec.place_receptacle != "User":
+                    place_receps = [
+                        obj for obj in current_objects
+                        if obj['objectType'] == env.current_task_spec.place_receptacle
+                    ]
+                    if len(place_receps) == 0:
+                        place_receps = None
+                
+                if target_obj is not None:
+                    pos = target_obj["axisAlignedBoundingBox"]["center"]
+                    self.task.target_positions = {
+                        env.current_task_spec.pickup_object: np.array([pos[k] for k in ("x", "y", "z")], dtype=np.float32),
+                    }
+                if place_receps is not None:
+                    pos = place_receps[0]["axisAlignedBoundingBox"]["center"]
+                    self.task.target_positions[env.current_task_spec.place_receptacle] = np.array([pos[k] for k in ("x", "y", "z")], dtype=np.float32)
             
-            # return dict(action="HEHEE")
             return dict(action="Pass")
 
         elif subtask_action == "Navigate":
@@ -1171,12 +1246,14 @@ class SubTaskExpert:
                     )
             assert target_obj is not None
             self._last_to_interact_object_pose = target_obj
-            # expert_nav_action = self._expert_nav_action_to_obj(
-            #     obj=target_obj
-            # )
-            expert_nav_action = self._expert_nav_action_to_position(
-                position=self.task.target_positions[subtask_target]
+            expert_nav_action = self._expert_nav_action_to_obj(
+                obj=target_obj
             )
+            
+            # if position is given
+            # expert_nav_action = self._expert_nav_action_to_position(
+            #     position=self.task.target_positions[subtask_target]
+            # )
 
             if expert_nav_action is None:
                 interactable_positions = self._get_interactable_positions(obj=target_obj)
@@ -1191,13 +1268,23 @@ class SubTaskExpert:
                         f"Object {target_obj['objectId']} in scene {env.scene}"
                         f" has no interactable positions."
                     )
+                return dict(action=expert_nav_action)
             elif expert_nav_action == "Pass":
+                # retry = 0
                 if not target_obj["visible"]:
                     if self._invalidate_interactable_loc_for_pose(
                         location=agent_loc, obj_pose=target_obj
                     ):
                         return self._generate_expert_action_dict()
-                    raise RuntimeError(" IMPOSSIBLE. ")
+                    # import pdb; pdb.set_trace()
+                    # raise RuntimeError(" IMPOSSIBLE. ")
+                    
+                    else:
+                        return dict(action="Fail")
+                else:
+                    return dict(action="Fail")
+            elif expert_nav_action == "Fail":
+                return dict(action=expert_nav_action)
             else:
                 return dict(action=expert_nav_action)
 
@@ -1213,7 +1300,8 @@ class SubTaskExpert:
                     )
             assert target_obj is not None and target_obj['visible']
             self._last_to_interact_object_pose = target_obj
-            return dict(action="Pickup", objectType=target_obj["objectType"])
+            # return dict(action="Pickup", objectType=target_obj["objectType"])
+            return dict(action="Pickup")
 
         elif subtask_action == "Put":
             with include_object_data(env.controller):
@@ -1234,7 +1322,8 @@ class SubTaskExpert:
             assert target_obj is not None and held_object["objectId"] == target_obj["objectId"]
             assert place_obj is not None and place_obj["visible"]
             self._last_to_interact_object_pose = place_obj
-            return dict(action="PutByType", objectType=place_obj["objectType"])
+            # return dict(action="PutByType", objectType=place_obj["objectType"])
+            return dict(action="Put")
             
         elif subtask_action in ["Open", "Close"]:
             with include_object_data(env.controller):

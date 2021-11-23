@@ -90,7 +90,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         super().__init__(
             env=env, sensors=sensors, task_info=dict(), max_steps=max_steps,
         )
-        self.env = env
+        self.env: HomeServiceTHOREnvironment = env
         self.discrete_actions = discrete_actions
         self.smooth_nav = smooth_nav
         self.smoothing_factor = smoothing_factor if self.smooth_nav else 1
@@ -105,7 +105,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         self._2nd_check: bool = False
         self._init_position_change_sensor: bool = False
 
-        self._target_positions: Dict[str, np.array] = {}
+        self._target_positions: Dict[str, np.ndarray] = {}
         self._target_visibles: Dict[str, bool] = {}
         # self._place_position: Optional[np.array] = None
         # self._place_visible: Optional[bool] = None
@@ -249,10 +249,12 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
                 self._subtask_step += 1
                 self._check_goto_done = False
                 self.require_init_position_sensor = True
+                self._1st_check = self._2nd_check = self._took_goto_action = False
                 return True
         
         elif subtask_action == "Scan":
             # TODO
+            self._subtask_step += 1
             return True
 
         else:
@@ -307,188 +309,254 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         obs = [self._obs]
         action_name = self.action_names()[action]
 
-        if action_name.startswith("pickup"):
-            with include_object_data(self.env.controller):
-                metadata = self.env.last_event.metadata
+        # if action_name.startswith("pickup_"):
+        #     with include_object_data(self.env.controller):
+        #         metadata = self.env.last_event.metadata
 
-                if len(metadata["inventoryObjects"]) != 0:
+        #         if len(metadata["inventoryObjects"]) != 0:
+        #             action_success = False
+        #         else:
+        #             object_type = stringcase.pascalcase(
+        #                 action_name.replace("pickup_", "")
+        #             )
+        #             possible_objects = [
+        #                 o
+        #                 for o in metadata["objects"]
+        #                 if o["visible"] and o["objectType"] == object_type
+        #             ]
+
+        #             possible_objects = sorted(
+        #                 possible_objects, key=lambda po: (po["distance"], po["name"])
+        #             )
+
+        #             object_before = None
+        #             if len(possible_objects) > 0:
+        #                 object_before = possible_objects[0]
+        #                 object_id = object_before["objectId"]
+
+        #             if object_before is not None:
+        #                 self.env.controller.step(
+        #                     "PickupObject",
+        #                     objectId=object_id,
+        #                     **self.env.physics_step_kwargs,
+        #                 )
+        #                 action_success = self.env.last_event.metadata["lastActionSuccess"]
+        #             else:
+        #                 action_success = False
+
+        #             if action_success and self.env.held_object is None:
+        #                 get_logger().warning(
+        #                     f"`PickupObject` was successful in picking up {object_id} but we're not holding"
+        #                     f" any object! Current task spec: \n {self.env.current_task_spec}"
+        #                 )
+        #                 action_success = False
+
+        # elif action_name.startswith("open_by_type"):
+        #     object_type = stringcase.pascalcase(
+        #         action_name.replace("open_by_type_", "")
+        #     )
+        #     with include_object_data(self.env.controller):
+        #         metadata = self.env.last_event.metadata
+        #         pickup_target = self.env.current_task_spec.pickup_target
+        #         place_target = self.env.current_task_spec.place_target
+
+        #         pickup_target_openable_receptacle = None
+        #         if pickup_target["parentReceptacles"] is not None:
+        #             for obj in metadata["objects"]:
+        #                 if (
+        #                     obj["openable"]
+        #                     and obj["objectId"] in pickup_target["parentReceptacles"]
+        #                 ):
+        #                     pickup_target_openable_receptacle = obj
+        #                     break
+
+        #         object_before = None
+        #         pickup_target_openable_receptacle_name = (
+        #             pickup_target_openable_receptacle["name"]
+        #             if pickup_target_openable_receptacle is not None and "name" in pickup_target_openable_receptacle
+        #             else None
+        #         )
+
+        #         for obj in metadata["objects"]:
+        #             if (
+        #                 obj["visible"]
+        #                 and obj["openable"]
+        #                 and obj["objectType"] == object_type
+        #                 and (
+        #                     obj["name"] == place_target["name"]
+        #                     or obj["name"] == pickup_target_openable_receptacle_name
+        #                 )
+        #             ):
+        #                 object_before = obj
+        #                 break
+
+        #         if object_before is not None:
+        #             if object_before["openness"] > 0.0:
+        #                 self.env.controller.step(
+        #                     "CloseObject",
+        #                     objectId=object_before["objectId"],
+        #                     **self.env.physics_step_kwargs,
+        #                 )
+                    
+        #             self.env.controller.step(
+        #                 "OpenObject",
+        #                 objectId=object_before["objectId"],
+        #                 openness=1.0,
+        #                 **self.env.physics_step_kwargs,
+        #             )
+        #             action_success = self.env.last_event.metadata["lastActionSuccess"]
+        #         else:
+        #             action_success = False
+
+        # elif action_name.startswith("close_by_type"):
+        #     object_type = stringcase.pascalcase(
+        #         action_name.replace("close_by_type_", "")
+        #     )
+        #     with include_object_data(self.env.controller):
+        #         metadata = self.env.last_event.metadata
+        #         pickup_target = self.env.current_task_spec.pickup_target
+        #         place_target = self.env.current_task_spec.place_target
+
+        #         pickup_target_openable_receptacle = None
+        #         if pickup_target["parentReceptacles"] is not None:
+        #             for obj in metadata["objects"]:
+        #                 if (
+        #                     obj["openable"]
+        #                     and obj["objectId"] in pickup_target["parentReceptacles"]
+        #                 ):
+        #                     pickup_target_openable_receptacle = obj
+        #                     break
+                        
+        #         object_before = None
+        #         pickup_target_openable_receptacle_name = (
+        #             pickup_target_openable_receptacle["name"]
+        #             if pickup_target_openable_receptacle is not None and "name" in pickup_target_openable_receptacle
+        #             else None
+        #         )
+
+        #         for obj in metadata["objects"]:
+        #             if (
+        #                 obj["visible"]
+        #                 and obj["openable"]
+        #                 and obj["objectType"] == object_type
+        #                 and (
+        #                     obj["name"] == place_target["name"]
+        #                     or obj["name"] == pickup_target_openable_receptacle_name
+        #                 )
+        #             ):
+        #                 object_before = obj
+        #                 break
+
+        #         if object_before is not None:
+        #             if object_before["openness"] > 0.0:
+        #                 self.env.controller.step(
+        #                     "CloseObject",
+        #                     objectId=object_before["objectId"],
+        #                     **self.env.physics_step_kwargs,
+        #                 )
+                    
+        #             action_success = self.env.last_event.metadata["lastActionSuccess"]
+        #         else:
+        #             action_success = False
+
+        # elif action_name.startswith("put_by_type"):
+        #     object_type = stringcase.pascalcase(
+        #         action_name.replace("put_by_type_", "")
+        #     )
+        #     with include_object_data(self.env.controller):
+        #         metadata = self.env.last_event.metadata
+        #         pickup_object = self.env.current_task_spec.pickup_object
+        #         place_receptacle = self.env.current_task_spec.place_receptacle
+
+        #         if len(metadata["inventoryObjects"]) == 0:
+        #             action_success = False
+        #         else:
+        #             object_before = None
+        #             for obj in metadata["objects"]:
+        #                 if (
+        #                     obj["visible"]
+        #                     and obj["receptacle"]
+        #                     and obj["objectType"] == place_receptacle
+        #                     # and obj["name"] == place_target["name"]
+        #                 ):
+        #                     object_before = obj
+        #                     break
+                    
+        #             if object_before is not None:
+        #                 self.env.controller.step(
+        #                     "PutObject",
+        #                     objectId=object_before["objectId"],
+        #                     **self.env.physics_step_kwargs,
+        #                 )
+        #                 action_success = self.env.last_event.metadata["lastActionSuccess"]
+        #             else:
+        #                 action_success = False
+
+        if action_name == "pickup":
+            pickup_obj_type = self.env.current_task_spec.pickup_object
+            with include_object_data(self.env.controller):
+                md = self.env.last_event.metadata
+
+                if len(md["inventoryObjects"]) != 0:
                     action_success = False
                 else:
-                    object_type = stringcase.pascalcase(
-                        action_name.replace("pickup_", "")
+                    pickup_obj = next(
+                        (
+                            obj for obj in md['objects']
+                            if obj['objectType'] == pickup_obj_type
+                        ), None
                     )
-                    possible_objects = [
-                        o
-                        for o in metadata["objects"]
-                        if o["visible"] and o["objectType"] == object_type
-                    ]
-
-                    possible_objects = sorted(
-                        possible_objects, key=lambda po: (po["distance"], po["name"])
-                    )
-
-                    object_before = None
-                    if len(possible_objects) > 0:
-                        object_before = possible_objects[0]
-                        object_id = object_before["objectId"]
-
-                    if object_before is not None:
+                    if pickup_obj is None:
+                        action_success = False
+                    else:
                         self.env.controller.step(
                             "PickupObject",
-                            objectId=object_id,
+                            objectId=pickup_obj['objectId'],
                             **self.env.physics_step_kwargs,
                         )
                         action_success = self.env.last_event.metadata["lastActionSuccess"]
-                    else:
-                        action_success = False
-
+                    
                     if action_success and self.env.held_object is None:
                         get_logger().warning(
-                            f"`PickupObject` was successful in picking up {object_id} but we're not holding"
+                            f"`PickupObject` was successful in picking up {pickup_obj} but we're not holding"
                             f" any object! Current task spec: \n {self.env.current_task_spec}"
                         )
                         action_success = False
 
-        elif action_name.startswith("open_by_type"):
-            object_type = stringcase.pascalcase(
-                action_name.replace("open_by_type_", "")
-            )
+        elif action_name == "put":
+            pickup_obj_type = self.env.current_task_spec.pickup_object
+            place_recep_type = self.env.current_task_spec.place_receptacle
             with include_object_data(self.env.controller):
-                metadata = self.env.last_event.metadata
-                pickup_target = self.env.current_task_spec.pickup_target
-                place_target = self.env.current_task_spec.place_target
+                md = self.env.last_event.metadata
 
-                pickup_target_openable_receptacle = None
-                if pickup_target["parentReceptacles"] is not None:
-                    for obj in metadata["objects"]:
-                        if (
-                            obj["openable"]
-                            and obj["objectId"] in pickup_target["parentReceptacles"]
-                        ):
-                            pickup_target_openable_receptacle = obj
-                            break
-
-                object_before = None
-                pickup_target_openable_receptacle_name = (
-                    pickup_target_openable_receptacle["name"]
-                    if pickup_target_openable_receptacle is not None and "name" in pickup_target_openable_receptacle
-                    else None
-                )
-
-                for obj in metadata["objects"]:
-                    if (
-                        obj["visible"]
-                        and obj["openable"]
-                        and obj["objectType"] == object_type
-                        and (
-                            obj["name"] == place_target["name"]
-                            or obj["name"] == pickup_target_openable_receptacle_name
-                        )
-                    ):
-                        object_before = obj
-                        break
-
-                if object_before is not None:
-                    if object_before["openness"] > 0.0:
-                        self.env.controller.step(
-                            "CloseObject",
-                            objectId=object_before["objectId"],
-                            **self.env.physics_step_kwargs,
-                        )
-                    
-                    self.env.controller.step(
-                        "OpenObject",
-                        objectId=object_before["objectId"],
-                        openness=1.0,
-                        **self.env.physics_step_kwargs,
+                if len(md["inventoryObjects"]) == 0:
+                    action_success = False
+                else:
+                    place_recep = next(
+                        (
+                            obj for obj in md['objects']
+                            if (
+                                obj['visible']
+                                and obj['receptacle']
+                                and obj['objectType'] == place_recep_type
+                            )
+                        ), None
                     )
-                    action_success = self.env.last_event.metadata["lastActionSuccess"]
-                else:
-                    action_success = False
-
-        elif action_name.startswith("close_by_type"):
-            object_type = stringcase.pascalcase(
-                action_name.replace("close_by_type_", "")
-            )
-            with include_object_data(self.env.controller):
-                metadata = self.env.last_event.metadata
-                pickup_target = self.env.current_task_spec.pickup_target
-                place_target = self.env.current_task_spec.place_target
-
-                pickup_target_openable_receptacle = None
-                if pickup_target["parentReceptacles"] is not None:
-                    for obj in metadata["objects"]:
-                        if (
-                            obj["openable"]
-                            and obj["objectId"] in pickup_target["parentReceptacles"]
-                        ):
-                            pickup_target_openable_receptacle = obj
-                            break
-                        
-                object_before = None
-                pickup_target_openable_receptacle_name = (
-                    pickup_target_openable_receptacle["name"]
-                    if pickup_target_openable_receptacle is not None and "name" in pickup_target_openable_receptacle
-                    else None
-                )
-
-                for obj in metadata["objects"]:
-                    if (
-                        obj["visible"]
-                        and obj["openable"]
-                        and obj["objectType"] == object_type
-                        and (
-                            obj["name"] == place_target["name"]
-                            or obj["name"] == pickup_target_openable_receptacle_name
-                        )
-                    ):
-                        object_before = obj
-                        break
-
-                if object_before is not None:
-                    if object_before["openness"] > 0.0:
-                        self.env.controller.step(
-                            "CloseObject",
-                            objectId=object_before["objectId"],
-                            **self.env.physics_step_kwargs,
-                        )
-                    
-                    action_success = self.env.last_event.metadata["lastActionSuccess"]
-                else:
-                    action_success = False
-
-        elif action_name.startswith("put_by_type"):
-            object_type = stringcase.pascalcase(
-                action_name.replace("put_by_type_", "")
-            )
-            with include_object_data(self.env.controller):
-                metadata = self.env.last_event.metadata
-                pickup_object = self.env.current_task_spec.pickup_object
-                place_receptacle = self.env.current_task_spec.place_receptacle
-
-                if len(metadata["inventoryObjects"]) == 0:
-                    action_success = False
-                else:
-                    object_before = None
-                    for obj in metadata["objects"]:
-                        if (
-                            obj["visible"]
-                            and obj["receptacle"]
-                            and obj["objectType"] == place_receptacle
-                            # and obj["name"] == place_target["name"]
-                        ):
-                            object_before = obj
-                            break
-                    
-                    if object_before is not None:
+                    if place_recep is None:
+                        action_success = False
+                    else:
                         self.env.controller.step(
                             "PutObject",
-                            objectId=object_before["objectId"],
+                            objectId=place_recep["objectId"],
                             **self.env.physics_step_kwargs,
                         )
                         action_success = self.env.last_event.metadata["lastActionSuccess"]
-                    else:
-                        action_success = False
+
+        elif action_name == "open":
+            pass
+
+        elif action_name == "close":
+            pass
 
         elif action_name.startswith(("move", "rotate")):
             opposites = {
@@ -559,14 +627,14 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
             self.agent_locs.appned(self.env.get_agent_location())
         
         subtask_done = self.is_current_subtask_done()
-        next_obs = self.get_observations()
+        self._obs = self.get_observations()
 
         return RLStepResult(
             observation=None,
             reward=self._judge(
                 obs=obs[0],
                 action=action,
-                next_obs=next_obs,
+                next_obs=self._obs,
                 action_success=action_success,
                 subtask_done=subtask_done
             ),
@@ -616,6 +684,12 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
         task_plan.append(("Scan", None, None))
         self.task_planner = sEDM_model()
         planner_result = self.task_planner.inference(target_object=target_object, target_place=target_place)
+        for i in range(len(planner_result)):
+            if planner_result[i][-1] == "hanger":
+                planner_result[i] = (planner_result[i][0], planner_result[i][1], "ToiletPaperHanger")
+            if planner_result[i][1] == "hanger":
+                planner_result[i] = (planner_result[i][0], "ToiletPaperHanger", planner_result[i][2])
+        
         if target_place == "User":
             task_plan.extend(planner_result[:2])
             task_plan.append(("Goto", start_scene_type, None))
@@ -675,38 +749,44 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
             return {}
         
         env = self.env
-        pickup_target = env.current_task_spec.pickup_target
-        place_target = env.current_task_spec.place_target
+        pickup_object = env.current_task_spec.pickup_object
+        start_receptacle = env.current_task_spec.start_receptacle
+        place_receptacle = env.current_task_spec.place_receptacle
 
         target_object = next(
             (
                 obj
                 for obj in env.last_event.metadata["objects"]
-                if obj["name"] == pickup_target["name"]
+                if obj["objectType"] == pickup_object
             ), None
         )
         assert target_object is not None
 
-        possible_place_objects = [
-            obj for obj in env.last_event.metadata["objects"]
-            if obj["objectType"] == place_target["objectType"]
-        ]
-        assert len(possible_place_objects) > 0
+        if place_receptacle != "User":
+            possible_place_objects = [
+                obj for obj in env.last_event.metadata["objects"]
+                if obj["objectType"] == place_receptacle
+            ]
+            assert len(possible_place_objects) > 0
 
-        receptacle = None
-        if target_object["parentReceptacles"] is not None:
-            receptacle = next(
-                (
-                    o for o in possible_place_objects
-                    if o['objectId'] in target_object["parentReceptacles"]
-                ), None
-            )
+        # receptacle = None
+        # if target_object["parentReceptacles"] is not None:
+        #     receptacle = next(
+        #         (
+        #             o for o in possible_place_objects
+        #             if o['objectId'] in target_object["parentReceptacles"]
+        #         ), None
+        #     )
         
-
+        print(f"self.actions_taken: {self.actions_taken}")
+        print(f"len(self.actions_taken): {len(self.actions_taken)}")
+        print(f"self.greedy_expert.expert_action_list: {self.greedy_expert.expert_action_list}")
+        print(f"len(self.greedy_expert.expert_action_list): {len(self.greedy_expert.expert_action_list)}")
         metrics = {
             **super().metrics(),
             **{
-                "success": float(True if receptacle is not None else False),
+                "success": float(True if self.current_subtask[0] == "Done" else False),
+                "subtask_success": float(self._subtask_step / self.num_subtasks)
             }
         }
 
@@ -1068,20 +1148,26 @@ class HomeServiceTaskSampler(TaskSampler):
                     pickup_obj = splits[2]
                     start_recep = splits[4]
                     target_recep = None
-
-                    target_recep_allowed = True
             
                 if allowed_pickup_objs is not None:
                     if pickup_obj in allowed_pickup_objs:
                         pickup_allowed = True
+                else:
+                    pickup_allowed = True
                 
                 if allowed_start_receps is not None:
                     if start_recep in allowed_start_receps:
                         start_recep_allowed = True
+                else: 
+                    start_recep_allowed = True
                 
                 if allowed_target_receps is not None:
-                    if target_recep is not None and target_recep in allowed_target_receps:
+                    if "User" in allowed_target_receps and splits[0] == "Bring":
                         target_recep_allowed = True
+                    elif target_recep is not None and target_recep in allowed_target_receps:
+                        target_recep_allowed = True
+                else:
+                    target_recep_allowed = True
 
                 if pickup_allowed and start_recep_allowed and target_recep_allowed:
                     filtered_keys.append(task_key)
