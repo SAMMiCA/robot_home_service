@@ -137,7 +137,7 @@ class PickAndPlaceRGBILBaseExperimentConfig(PickAndPlaceRGBBaseExperimentConfig)
 
     @classmethod
     def num_test_processes(cls) -> int:
-        return 8
+        return 1
 
     @classmethod
     def _use_label_to_get_training_params(cls):

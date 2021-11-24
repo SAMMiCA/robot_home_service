@@ -1130,6 +1130,9 @@ class SubTaskExpert:
         we tried to interact but couldn't."""
         env: HomeServiceTHOREnvironment = self.task.env
 
+        if obj_pose is None:
+            return False
+            
         interactable_positions = env._interactable_positions_cache.get(
             scene_name=env.scene, obj=obj_pose, controller=env.controller
         )

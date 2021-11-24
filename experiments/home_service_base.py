@@ -692,7 +692,7 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
                 # allowed_pickup_objs=None,
                 # allowed_start_receps=None,
                 # allowed_target_receps=None,
-                # allowed_scene_inds=None,
+                allowed_scene_inds=range(29, 31),
                 process_ind=process_ind,
                 total_processes=total_processes,
                 headless=headless,
