@@ -3,7 +3,7 @@ from experiments.pick_and_place.pick_and_place_rgb_il_base import PickAndPlaceRG
 
 class PickAndPlaceRGBResNetDaggerExperimentConfig(PickAndPlaceRGBILBaseExperimentConfig):
     USE_RESNET_CNN = True
-    IL_PIPELINE_TYPE = "2proc"
+    IL_PIPELINE_TYPE = "8proc"
 
     @classmethod
     def tag(cls) -> str:

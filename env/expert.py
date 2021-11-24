@@ -969,10 +969,13 @@ class SubTaskExpert:
         obj: Dict[str, Any]
     ):
         if self.map_oracle:
-            return self.task.env._interactable_positions_cache.get(
-                scene_name=self.task.env.scene, obj=obj, controller=self.task.env.controller,
-                # max_distance=1.0
-            )
+            if obj is not None:
+                return self.task.env._interactable_positions_cache.get(
+                    scene_name=self.task.env.scene, obj=obj, controller=self.task.env.controller,
+                    # max_distance=1.0
+                )
+            else:
+                return []
         else:
             #TODO
             pass
@@ -1235,6 +1238,12 @@ class SubTaskExpert:
 
         elif subtask_action == "Navigate":
             # from metadata
+            # if env.scene != env.current_task_spec.target_scene:
+            #     # goto action performed
+            #     while self.task.current_subtask[0] == "Goto":
+            #         self.task.rollback_subtask()
+                    
+            #     return dict(action="Pass")
             with include_object_data(env.controller):
                 current_objects = env.last_event.metadata["objects"]
 
@@ -1244,7 +1253,7 @@ class SubTaskExpert:
                     target_obj = next(
                         (o for o in current_objects if o['objectType'] == subtask_target), None
                     )
-            assert target_obj is not None
+            # assert target_obj is not None
             self._last_to_interact_object_pose = target_obj
             expert_nav_action = self._expert_nav_action_to_obj(
                 obj=target_obj
@@ -1289,6 +1298,12 @@ class SubTaskExpert:
                 return dict(action=expert_nav_action)
 
         elif subtask_action == "Pickup":
+            # if env.scene != env.current_task_spec.target_scene:
+            #     # goto action performed
+            #     while self.task.current_subtask[0] == "Goto":
+            #         self.task.rollback_subtask()
+                    
+            #     return dict(action="Pass")
             with include_object_data(env.controller):
                 current_objects = env.last_event.metadata["objects"]
 
@@ -1304,6 +1319,12 @@ class SubTaskExpert:
             return dict(action="Pickup")
 
         elif subtask_action == "Put":
+            # if env.scene != env.current_task_spec.target_scene:
+            #     # goto action performed
+            #     while self.task.current_subtask[0] == "Goto":
+            #         self.task.rollback_subtask()
+                    
+            #     return dict(action="Pass")
             with include_object_data(env.controller):
                 current_objects = env.last_event.metadata["objects"]
 
@@ -1319,13 +1340,25 @@ class SubTaskExpert:
                     place_obj = next(
                         (o for o in current_objects if o['objectType'] == subtask_place), None
                     )
-            assert target_obj is not None and held_object["objectId"] == target_obj["objectId"]
+            # if held_object is None:
+            #     # Pickup has failed....
+            #     for _ in range(3):
+            #         self.task.rollback_subtask()
+            #     return dict(action="Pass")
+            
+            # assert target_obj is not None and held_object["objectId"] == target_obj["objectId"]
             # assert place_obj is not None and place_obj["visible"]
             self._last_to_interact_object_pose = place_obj
             # return dict(action="PutByType", objectType=place_obj["objectType"])
             return dict(action="Put")
             
         elif subtask_action in ["Open", "Close"]:
+            # if env.scene != env.current_task_spec.target_scene:
+            #     # goto action performed
+            #     while self.task.current_subtask[0] == "Goto":
+            #         self.task.rollback_subtask()
+                    
+            #     return dict(action="Pass")
             with include_object_data(env.controller):
                 current_objects = env.last_event.metadata["objects"]
 

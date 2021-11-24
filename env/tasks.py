@@ -32,7 +32,7 @@ from env.utils import (
     include_object_data,
 )
 
-from sEDM.test_edm import sEDM_model
+# from sEDM.test_edm import sEDM_model
 
 class HomeServiceTaskType(enum.Enum):
 
@@ -195,16 +195,39 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
             return True
 
         elif subtask_action == "Navigate":
+            if self.env.scene != self.env.current_task_spec.target_scene:
+                # goto action performed
+                while self.current_subtask[0] == "Goto":
+                    self.rollback_subtask()
+                
+                return False
+
             assert subtask_place is None
             cur_subtask_target = next(
                 (o for o in metadata["objects"] if o["objectType"] == subtask_target), None
             )
+            # assert cur_subtask_target is not None
+            # if cur_subtask_target is None:
+            #     # print(f"self.env.scene: {self.env.scene}")
+            #     # print(f"self.env.current_task_spec.target_scene: {self.env.current_task_spec.target_scene}")
+            #     # print(f'rollback subtask')
+            #     self.rollback_subtask()
+            #     return False
+                
             assert cur_subtask_target is not None
+
             if cur_subtask_target["visible"]:
                 self._subtask_step += 1
                 return True
 
         elif subtask_action == "Pickup":
+            if self.env.scene != self.env.current_task_spec.target_scene:
+                # goto action performed
+                while self.current_subtask[0] == "Goto":
+                    self.rollback_subtask()
+                
+                return False
+            
             assert subtask_place is None
             if metadata["lastActionSuccess"] and (
                 metadata["lastAction"] == f"{subtask_action}Object"
@@ -215,6 +238,13 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
                 return True
 
         elif subtask_action in ["Open", "Close"]:
+            if self.env.scene != self.env.current_task_spec.target_scene:
+                # goto action performed
+                while self.current_subtask[0] == "Goto":
+                    self.rollback_subtask()
+                
+                return False
+            
             assert subtask_place is None
             if metadata["lastActionSuccess"] and (
                 metadata["lastAction"] == f"{subtask_action}Object"
@@ -223,6 +253,13 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
                 return True
 
         elif subtask_action == "Put":
+            if self.env.scene != self.env.current_task_spec.target_scene:
+                # goto action performed
+                while self.current_subtask[0] == "Goto":
+                    self.rollback_subtask()
+                
+                return False
+                       
             assert subtask_place is not None
             cur_subtask_target = next(
                 (o for o in metadata["objects"] if o["objectType"] == subtask_target), None
@@ -243,14 +280,16 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
                     return True
 
         elif subtask_action == "Goto":
-            if metadata["lastActionSuccess"] and (
-                SCENE_TO_SCENE_TYPE[self.env.scene] == subtask_target
-            ) and self._check_goto_done:
-                self._subtask_step += 1
+            if self._check_goto_done:
                 self._check_goto_done = False
                 self.require_init_position_sensor = True
                 self._1st_check = self._2nd_check = self._took_goto_action = False
-                return True
+                
+                if metadata["lastActionSuccess"] and SCENE_TO_SCENE_TYPE[self.env.scene] == subtask_target:
+                    self._subtask_step += 1
+                    return True
+                
+                return False
         
         elif subtask_action == "Scan":
             # TODO
@@ -682,37 +721,31 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
         task_plan = []
         task_plan.append(("Goto", target_scene_type, None))
         task_plan.append(("Scan", None, None))
-        self.task_planner = sEDM_model()
-        planner_result = self.task_planner.inference(target_object=target_object, target_place=target_place)
-        for i in range(len(planner_result)):
-            if planner_result[i][-1] == "hanger":
-                planner_result[i] = (planner_result[i][0], planner_result[i][1], "ToiletPaperHanger")
-            if planner_result[i][1] == "hanger":
-                planner_result[i] = (planner_result[i][0], "ToiletPaperHanger", planner_result[i][2])
-        
-        if target_place == "User":
-            task_plan.extend(planner_result[:2])
-            task_plan.append(("Goto", start_scene_type, None))
-        else:
-            task_plan.extend(planner_result)
-        
-        if self.task_planner is None:
-            task_plan = []
-            pickup_object = self.env.current_task_spec.pickup_object
-            start_receptacle = self.env.current_task_spec.start_receptacle
-            place_receptacle = self.env.current_task_spec.place_receptacle
+        # self.task_planner = sEDM_model()
+        if self.task_planner is not None:
+            planner_result = self.task_planner.inference(target_object=target_object, target_place=target_place)
+            for i in range(len(planner_result)):
+                if planner_result[i][-1] == "hanger":
+                    planner_result[i] = (planner_result[i][0], planner_result[i][1], "ToiletPaperHanger")
+                if planner_result[i][1] == "hanger":
+                    planner_result[i] = (planner_result[i][0], "ToiletPaperHanger", planner_result[i][2])
             
-            start_scene = self.env.current_task_spec.start_scene
-            start_scene_type = SCENE_TO_SCENE_TYPE[start_scene]
-            target_scene = self.env.current_task_spec.target_scene
-            target_scene_type = SCENE_TO_SCENE_TYPE[target_scene]
+            if target_place == "User":
+                task_plan.extend(planner_result[:2])
+                task_plan.append(("Goto", start_scene_type, None))
+            else:
+                task_plan.extend(planner_result)
+        
+        else:
+            task_plan = []
+            
             task_plan.append(("Goto", target_scene_type, None))
             task_plan.append(("Scan", None, None))
-            task_plan.append(("Navigate", pickup_object, None))    
-            task_plan.append(("Pickup", pickup_object, None))
-            if place_receptacle != "User":
-                task_plan.append(("Navigate", place_receptacle, None))
-                task_plan.append(("Put", pickup_object, place_receptacle))
+            task_plan.append(("Navigate", target_object, None))    
+            task_plan.append(("Pickup", target_object, None))
+            if target_place != "User":
+                task_plan.append(("Navigate", target_place, None))
+                task_plan.append(("Put", target_object, target_place))
             else:
                 task_plan.append(("Goto", start_scene_type, None))
         

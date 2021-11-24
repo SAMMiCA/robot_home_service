@@ -145,6 +145,7 @@ if __name__ == "__main__":
         elif category_obj == "test":
             category_obj_idx = 1
             objs_for_task = list(sorted(PICKUP_OBJECTS_FOR_TEST))
+            target_objs = objs_for_task
 
         category_scene = task_sampler.stage.split('_')[1]
         if category_scene == "seen":
@@ -319,16 +320,16 @@ if __name__ == "__main__":
             print(f'moving to next task...')
             task = task_sampler.next_task()
 
-        print(f'collection all done for stage {stage}.')
-        task_sampler.close()
-
-    for category_object_idx, category_object in enumerate(categories):
-        for category_scene_idx, category_scene in enumerate(splits):
             coco_format_json = dict(
                 images=images[category_obj_idx][category_scene_idx],
                 annotations=annotations[category_obj_idx][category_scene_idx],
                 categories=[{'id': i+1, 'name': t} for i, t in enumerate(HOME_SERVICE_OBJECTS)]
             )
-            with open(os.path.join(ROOT_PATH, category_object, f'anno_{category_scene}.json'), 'w') as f:
+            with open(os.path.join(ROOT_PATH, categories[category_obj_idx], f'anno_{splits[category_scene_idx]}.json'), 'w') as f:
                 json.dump(coco_format_json, f)
+
+        print(f'collection all done for stage {stage}.')
+        task_sampler.close()
+
+        
 

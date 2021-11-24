@@ -146,7 +146,7 @@ class SubtaskHomeServiceSensor(
             subtask_place_position = np.zeros(3, dtype=np.float32)
             subtask_place_visible = 0
         elif current_subtask_action in ("Navigate", "Pickup", "Open", "Close"):
-            assert env.scene == env.current_task_spec.target_scene
+            # assert env.scene == env.current_task_spec.target_scene
 
             # from metadata
             subtask_target = next(
@@ -161,16 +161,19 @@ class SubtaskHomeServiceSensor(
                 subtask_target_position = task.target_positions[current_subtask_target]
             else:
                 subtask_target_position = np.zeros(3, dtype=np.float32)
-            subtask_target_visible = subtask_target["visible"] + 1 # Should be modified
+            if subtask_target is not None:
+                subtask_target_visible = subtask_target["visible"] + 1 # Should be modified
+            else:
+                subtask_target_visible = 0
 
             subtask_place_type = 0
             subtask_place_position = np.zeros(3, dtype=np.float32)
             subtask_place_visible = 0
 
         elif current_subtask_action == "Put":
-            assert env.scene == env.current_task_spec.target_scene
-            assert env.held_object is not None
-            assert current_subtask_target == env.held_object["objectType"]
+            # assert env.scene == env.current_task_spec.target_scene
+            # assert env.held_object is not None
+            # assert current_subtask_target == env.held_object["objectType"]
             subtask_target_type = self.object_type_to_ind[current_subtask_target] + 1 + 4
             subtask_target_position = np.zeros(3, dtype=np.float32)
             subtask_target_visible = 0
@@ -187,7 +190,10 @@ class SubtaskHomeServiceSensor(
                 subtask_place_position = task.target_positions[current_subtask_place]
             else:
                 subtask_target_position = np.zeros(3, dtype=np.float32)
-            subtask_place_visible = subtask_place["visible"] + 1 # Should be modified
+            if subtask_place is not None:
+                subtask_place_visible = subtask_place["visible"] + 1 # Should be modified
+            else:
+                subtask_place_visible = 0
         else:
             raise RuntimeError()
 
