@@ -9,6 +9,7 @@ import torch
 from allenact.algorithms.onpolicy_sync.policy import ActorCriticModel
 from allenact.algorithms.onpolicy_sync.storage import RolloutStorage
 from allenact.utils.tensor_utils import batch_observations
+from allenact.utils.spaces_utils import flatten
 
 from env.tasks import HomeServiceTaskSampler, HomeServiceTaskType
 from experiments.home_service_base import HomeServiceBaseExperimentConfig
@@ -49,6 +50,7 @@ net = cast(ActorCriticModel, PickAndPlaceRGBResNetDaggerExperimentConfig.create_
 net.load_state_dict(
     torch.load('./exp_PickAndPlaceRGBResNetDagger_8proc__stage_00__steps_000000250880.pt')['model_state_dict']
 )
+net.eval()
 
 rollouts = RolloutStorage(num_steps=4, num_samplers=1, actor_critic=net)
 rollouts.to(device)
@@ -60,12 +62,12 @@ for i in range(num_tasks):
     task = task_sampler.next_task()
     result_dict["task_keys"].append(task_sampler.current_task_spec.metrics["task_key"])
     obs = task.get_observations()
+    batch = batch_observations([obs], device)
+    rollouts.insert_observations(
+        sensor_preprocessor_graph.get_observations(batch)
+    )
 
     while not task.is_done():
-        batch = batch_observations([obs], device)
-        rollouts.insert_observations(
-            sensor_preprocessor_graph.get_observations(batch)
-        )
         with torch.no_grad():
             step_obs = rollouts.pick_observation_step(rollouts.step)
             memory = rollouts.pick_memory_step(rollouts.step)
@@ -75,15 +77,41 @@ for i in range(num_tasks):
             distr = net_output.distributions
             actions = distr.mode()
 
-        action_net = actions.item()
+        flat_actions = flatten(net.action_space, actions)
         action_expert, _ = task.query_expert()
 
-        if random.random() < 0.25:
+        if random.random() < 0.2:
             action_ind = action_expert
         else:
-            action_ind = action_net
+            action_ind = actions.item()
+        
+        actions[0, 0] = action_ind
 
         step_result = task.step(action=action_ind)
+        # step_result = task.step(action=actions.item())
+        obs = step_result.observation
+        rewards = torch.tensor(step_result.reward, dtype=torch.float, device=device)
+        rewards = rewards.unsqueeze(-1).unsqueeze(-1)
+        dones = step_result.done
+        masks = (
+            1.0
+            - torch.tensor(
+                dones, dtype=torch.float32, device=device,  # type:ignore
+            )
+        ).view(
+            -1, 1
+        ) 
+        
+        batch = batch_observations([obs], device)
+        rollouts.insert(
+            observations=sensor_preprocessor_graph.get_observations(batch),
+            memory=memory,
+            actions=actions,
+            action_log_probs=net_output.distributions.log_prob(actions)[0],
+            value_preds=net_output.values[0],
+            rewards=rewards,
+            masks=masks,
+        )
 
     if step_result.info["action_name"] == "done":
         # print(f"{i+1}-th task success")
