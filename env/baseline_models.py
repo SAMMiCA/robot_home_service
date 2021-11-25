@@ -46,6 +46,7 @@ class HomeServiceActorCriticSimpleConvRNN(ActorCriticModel[CategoricalDistr]):
         rel_position_change_uuid: str,
         ordered_object_types: Sequence[str],
         hidden_size=512,
+        prev_action_embedding_dim: int = 32,
         task_type_embedding_dim: int = 32,
         object_type_embedding_dim: int = 128,
         object_visible_embedding_dim: int = 16,
@@ -71,6 +72,9 @@ class HomeServiceActorCriticSimpleConvRNN(ActorCriticModel[CategoricalDistr]):
         self.subtask_uuid = subtask_uuid
         self.rel_position_change_uuid = rel_position_change_uuid
 
+        self.prev_action_embedder = nn.Embedding(
+            action_space.n + 1, embedding_dim=prev_action_embedding_dim
+        )
         self.task_type_embedder = nn.Embedding(
             num_embeddings=8, embedding_dim=task_type_embedding_dim
         )
@@ -85,7 +89,8 @@ class HomeServiceActorCriticSimpleConvRNN(ActorCriticModel[CategoricalDistr]):
         self.visual_encoder = self._create_visual_encoder()
 
         self.state_encoder = RNNStateEncoder(
-            task_type_embedding_dim
+            prev_action_embedding_dim
+            + task_type_embedding_dim
             + object_type_embedding_dim * 2
             + object_visible_embedding_dim * 2
             + position_dim
@@ -223,6 +228,10 @@ class HomeServiceResNetActorCriticRNN(HomeServiceActorCriticSimpleConvRNN):
         )
         vis_x = vis_x.view(*batch_shape, -1)
 
+        prev_action_x = self.prev_action_embedder(
+            ((~masks.bool()).long() * (prev_actions.unsqueeze(-1) + 1))
+        ).squeeze(-2)
+
         subtask = observations[self.subtask_uuid]
         task_type_x = self.task_type_embedder(subtask['type'])
         target_type_x = self.object_type_embedder(subtask['target_type'])
@@ -231,7 +240,7 @@ class HomeServiceResNetActorCriticRNN(HomeServiceActorCriticSimpleConvRNN):
         place_visible_x = self.object_visible_embedder(subtask['place_visible'])
         position_x = torch.cat([observations['rel_position_change']['agent_locs'], subtask['target_position'], subtask['place_position']], -1)
         position_x = self.position_encoder(position_x)
-        x = torch.cat([vis_x, task_type_x, target_type_x, target_visible_x, place_type_x, place_visible_x, position_x], -1)
+        x = torch.cat([vis_x, prev_action_x, task_type_x, target_type_x, target_visible_x, place_type_x, place_visible_x, position_x], -1)
         # print(f'x.shape: {x.shape}')
 
         x, rnn_hidden_states = self.state_encoder(x, memory.tensor("rnn"), masks)

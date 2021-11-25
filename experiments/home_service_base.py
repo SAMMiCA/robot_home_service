@@ -85,7 +85,7 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
     # YOLACT_KWARGS = YOLACT_KWARGS
 
     # Training parameters
-    TRAINING_STEPS = int(75e6)
+    TRAINING_STEPS = int(25e6)
     SAVE_INTERVAL = int(5e4)
     USE_RESNET_CNN = False
 
