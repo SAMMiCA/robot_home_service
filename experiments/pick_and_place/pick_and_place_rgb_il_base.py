@@ -1,11 +1,11 @@
 from typing import Tuple, Sequence, Optional, Dict, Any
-
 import torch
 
 from allenact.algorithms.onpolicy_sync.losses.imitation import Imitation
 from allenact.base_abstractions.sensor import ExpertActionSensor
 from allenact.utils.experiment_utils import PipelineStage
 from allenact.utils.misc_utils import all_unique
+from allenact.utils.viz_utils import AgentViewViz, VizSuite
 
 from experiments.pick_and_place.pick_and_place_rgb_base import PickAndPlaceRGBBaseExperimentConfig
 
@@ -92,6 +92,9 @@ def il_training_params(label: str, training_steps: int):
 class PickAndPlaceRGBILBaseExperimentConfig(PickAndPlaceRGBBaseExperimentConfig):
 
     IL_PIPELINE_TYPE: Optional[str] = None
+    # viz_ep_ids = ["Pick_Bowl_On_CounterTop_And_Place_DiningTable"]
+    # viz_video_ids = [["Pick_Bowl_On_CounterTop_And_Place_DiningTable"]]
+    # viz: Optional[VizSuite] = None
 
     @classmethod
     def sensors(cls, mode):
@@ -144,3 +147,25 @@ class PickAndPlaceRGBILBaseExperimentConfig(PickAndPlaceRGBBaseExperimentConfig)
         return il_training_params(
             label=cls.IL_PIPELINE_TYPE.lower(), training_steps=cls.TRAINING_STEPS
         )
+
+    # def get_viz(self, mode):
+    #     if self.viz is not None:
+    #         return self.viz
+        
+    #     self.viz = VizSuite(
+    #         episode_ids=self.viz_ep_ids,
+    #         mode=mode,
+    #         path_to_id=("task_info", ),
+    #         egocentric=AgentViewViz(
+    #             max_video_length=500, episode_ids=self.viz_video_ids
+    #         )
+    #     )
+
+    #     return self.viz
+    
+    # def machine_params(self, mode="train", **kwargs):
+    #     res = super().machine_params(mode, **kwargs)
+    #     if mode == "test":
+    #         res.set_visualizer(self.get_viz(mode))
+
+    #     return res

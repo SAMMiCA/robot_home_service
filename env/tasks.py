@@ -118,6 +118,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
 
         self.actions_taken = []
         self.actions_taken_success = []
+        self.subtask_info = [self.current_subtask]
         self.agent_locs = [self.env.get_agent_location()]
 
     @property
@@ -662,6 +663,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
 
         self.actions_taken.append(action_name)
         self.actions_taken_success.append(action_success)
+        self.subtask_info.append(self.current_subtask)
         if self.task_spec_in_metrics:
             self.agent_locs.append(self.env.get_agent_location())
         
@@ -830,6 +832,7 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
 
         task_info["actions_taken"] = self.actions_taken
         task_info["actions_taken_success"] = self.actions_taken_success
+        task_info["subtask_info"] = self.subtask_info
         task_info["unique_id"] = env.current_task_spec.unique_id if not env.current_task_spec.runtime_sample else None
 
         metrics = {
