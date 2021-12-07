@@ -2,11 +2,12 @@ from typing import Tuple, Sequence, Optional, Dict, Any
 import torch
 
 from allenact.algorithms.onpolicy_sync.losses.imitation import Imitation
-from allenact.base_abstractions.sensor import ExpertActionSensor
+# from allenact.base_abstractions.sensor import ExpertActionSensor
 from allenact.utils.experiment_utils import PipelineStage
 from allenact.utils.misc_utils import all_unique
 from allenact.utils.viz_utils import AgentViewViz, VizSuite
 
+from env.expert_sensors import SubTaskExpertSensor
 from experiments.pick_and_place.pick_and_place_rgb_base import PickAndPlaceRGBBaseExperimentConfig
 
 
@@ -100,7 +101,7 @@ class PickAndPlaceRGBILBaseExperimentConfig(PickAndPlaceRGBBaseExperimentConfig)
     def sensors(cls, mode):
         sensors = [
             *PickAndPlaceRGBBaseExperimentConfig.sensors(mode),
-            ExpertActionSensor(len(PickAndPlaceRGBBaseExperimentConfig.actions())),
+            SubTaskExpertSensor(len(PickAndPlaceRGBBaseExperimentConfig.actions())),
         ]
 
         return sensors

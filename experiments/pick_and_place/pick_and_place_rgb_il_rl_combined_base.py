@@ -7,6 +7,7 @@ from allenact.algorithms.onpolicy_sync.losses.ppo import PPO, PPOConfig
 from allenact.base_abstractions.sensor import ExpertActionSensor
 from allenact.utils.experiment_utils import LinearDecay, PipelineStage
 from allenact.utils.misc_utils import all_unique
+from env.expert_sensors import SubTaskExpertSensor
 
 from experiments.pick_and_place.pick_and_place_rgb_base import PickAndPlaceRGBBaseExperimentConfig
 
@@ -71,7 +72,7 @@ class PickAndPlaceRGBILRLCombinedBaseExperimentConfig(PickAndPlaceRGBBaseExperim
     def sensors(cls, mode):
         sensors = [
             *PickAndPlaceRGBBaseExperimentConfig.sensors(mode),
-            ExpertActionSensor(len(PickAndPlaceRGBBaseExperimentConfig.actions())),
+            SubTaskExpertSensor(len(PickAndPlaceRGBBaseExperimentConfig.actions())),
         ]
 
         return sensors
