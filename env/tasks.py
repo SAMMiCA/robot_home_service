@@ -99,8 +99,8 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         self.task_spec_in_metrics = task_spec_in_metrics
 
         self._took_end_action: bool = False
-        self._took_goto_action: bool = False
-        self._check_goto_done: bool = False
+        # self._took_goto_action: bool = False
+        # self._check_goto_done: bool = False
         self._1st_check: bool = False
         self._2nd_check: bool = False
         self._init_position_change_sensor: bool = False
@@ -153,17 +153,6 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
     def require_init_position_sensor(self, val: bool):
         self._init_position_change_sensor = val
 
-    # @place_position.setter
-    # def place_position(self, position: Optional[Union[np.ndarray, dict]]):
-    #     if isinstance(position, np.ndarray):
-    #         self._place_position = position
-    #     elif isinstance(position, dict):
-    #         self._place_position = np.array([position["x"], position["y"], position["z"]], dtype=np.float32)
-
-    # @place_visible.setter
-    # def place_visible(self, visible: Optional[bool]):
-    #     self._place_visible = visible
-
     @property
     def num_subtasks(self) -> int:
         return len(self.planned_task)
@@ -188,6 +177,9 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
     def rollback_subtask(self):
         self._subtask_step -= 1
 
+    def subtask_succeeded(self):
+        self._subtask_step += 1
+
     def is_current_subtask_done(self):
         subtask_action, subtask_target, subtask_place = self.current_subtask
         metadata = self.env.last_event.metadata
@@ -195,105 +187,72 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
             return True
 
         elif subtask_action == "Navigate":
-            if self.env.scene != self.env.current_task_spec.target_scene:
-                # goto action performed
-                while self.current_subtask[0] == "Goto":
-                    self.rollback_subtask()
-                
-                return False
-
             assert subtask_place is None
             cur_subtask_target = next(
                 (o for o in metadata["objects"] if o["objectType"] == subtask_target), None
             )
-            # assert cur_subtask_target is not None
-            # if cur_subtask_target is None:
-            #     # print(f"self.env.scene: {self.env.scene}")
-            #     # print(f"self.env.current_task_spec.target_scene: {self.env.current_task_spec.target_scene}")
-            #     # print(f'rollback subtask')
-            #     self.rollback_subtask()
-            #     return False
-                
-            assert cur_subtask_target is not None
+            
+            if self.env.scene == self.env.current_task_spec.target_scene:
+                assert cur_subtask_target is not None
 
-            if cur_subtask_target["visible"]:
-                self._subtask_step += 1
-                return True
+                if cur_subtask_target["visible"]:
+                    self.subtask_succeeded()
+                    return True
 
         elif subtask_action == "Pickup":
-            if self.env.scene != self.env.current_task_spec.target_scene:
-                # goto action performed
-                while self.current_subtask[0] == "Goto":
-                    self.rollback_subtask()
-                
-                return False
-            
             assert subtask_place is None
             if metadata["lastActionSuccess"] and (
                 metadata["lastAction"] == f"{subtask_action}Object"
             ) and (
                 self.env.held_object["objectType"] == subtask_target
             ):
-                self._subtask_step += 1
+                self.subtask_succeeded()
                 return True
 
         elif subtask_action in ["Open", "Close"]:
-            if self.env.scene != self.env.current_task_spec.target_scene:
-                # goto action performed
-                while self.current_subtask[0] == "Goto":
-                    self.rollback_subtask()
-                
-                return False
-            
             assert subtask_place is None
             if metadata["lastActionSuccess"] and (
                 metadata["lastAction"] == f"{subtask_action}Object"
             ):
-                self._subtask_step += 1
+                self.subtask_succeeded()
                 return True
 
         elif subtask_action == "Put":
-            if self.env.scene != self.env.current_task_spec.target_scene:
-                # goto action performed
-                while self.current_subtask[0] == "Goto":
-                    self.rollback_subtask()
-                
-                return False
-                       
             assert subtask_place is not None
             cur_subtask_target = next(
                 (o for o in metadata["objects"] if o["objectType"] == subtask_target), None
             )
-            assert cur_subtask_target is not None
             cur_subtask_place = next(
                 (o for o in metadata["objects"] if o["objectType"] == subtask_place), None
             )
-            assert cur_subtask_place is not None
+            if self.env.scene == self.env.current_task_spec.target_scene:
+                assert cur_subtask_target is not None
+                assert cur_subtask_place is not None
 
-            if metadata["lastActionSuccess"] and (
-                metadata["lastAction"] == f"{subtask_action}Object"
-            ) and (
-                self.env.held_object is None
-            ):
-                if cur_subtask_place["objectId"] in cur_subtask_target["parentReceptacles"]:
-                    self._subtask_step += 1
-                    return True
+                if metadata["lastActionSuccess"] and (
+                    metadata["lastAction"] == f"{subtask_action}Object"
+                ) and (
+                    self.env.held_object is None
+                ):
+                    if cur_subtask_place["objectId"] in cur_subtask_target["parentReceptacles"]:
+                        self.subtask_succeeded()
+                        return True
 
         elif subtask_action == "Goto":
-            if self._check_goto_done:
-                self._check_goto_done = False
-                self.require_init_position_sensor = True
-                self._1st_check = self._2nd_check = self._took_goto_action = False
-                
+            # TODO
+            # if current room type detected from sensor is equal to the target room type
+            # return True
+            
+            # ORACLE
+            if self.greedy_expert.check_room_type_done:
                 if metadata["lastActionSuccess"] and SCENE_TO_SCENE_TYPE[self.env.scene] == subtask_target:
-                    self._subtask_step += 1
-                    return True
-                
-                return False
+                    if not self.greedy_expert.require_check_room_type:
+                        self.subtask_succeeded()
+                        return True
         
         elif subtask_action == "Scan":
             # TODO
-            self._subtask_step += 1
+            self.subtask_succeeded()
             return True
 
         else:
@@ -332,12 +291,17 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
 
     def _judge(self, obs, action, next_obs, action_success, subtask_done) -> float:
         """Return the reward from a new (s, a, s')."""
-        reward = -0.05
+        action_name = self.action_names()[action]
+        reward = -0.01
         if subtask_done:
             reward += 1
 
         if self.current_subtask[0] == "Done":
             reward += 5
+        elif self.current_subtask[0] != "Goto":
+            if action_name.startswith("goto"):
+                # Wrongly moved to other room type
+                reward -= 10
 
         return reward
 
@@ -654,7 +618,8 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
             )
             action_success = self.env.last_event.metadata['lastActionSuccess']
             if action_success:
-                self._took_goto_action = True
+                self.require_init_position_sensor = True
+            #     self._took_goto_action = True
         else:
             raise RuntimeError(
                 f"Action '{action_name}' is not in the action space {HomeServiceActionSpace}"
@@ -680,6 +645,10 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
             done=self.is_done(),
             info={"action_name": action_name, "action_success": action_success},
         )
+
+    def get_observations(self, **kwargs) -> Any:
+        self._obs = super().get_observations(**kwargs)
+        return self._obs
 
     def step(self, action: int) -> RLStepResult:
         step_result = super().step(action=action)
@@ -751,31 +720,31 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
         
         return task_plan
         
-    def query_expert(self, **kwargs) -> Tuple[Any, bool]:
-        if self.greedy_expert is None:
-            if not hasattr(self.env, "shortest_path_navigator"):
-                self.env.shortest_path_navigator = ShortestPathNavigatorTHOR(
-                    controller = self.env.controller,
-                    grid_size=STEP_SIZE,
-                    include_move_left_right=all(
-                        f"move_{k}" in self.action_names() for k in ["left", "right"]
-                    ),
-                )
+    # def query_expert(self, **kwargs) -> Tuple[Any, bool]:
+    #     if self.greedy_expert is None:
+    #         if not hasattr(self.env, "shortest_path_navigator"):
+    #             self.env.shortest_path_navigator = ShortestPathNavigatorTHOR(
+    #                 controller = self.env.controller,
+    #                 grid_size=STEP_SIZE,
+    #                 include_move_left_right=all(
+    #                     f"move_{k}" in self.action_names() for k in ["left", "right"]
+    #                 ),
+    #             )
             
-            # self.greedy_expert = GreedySimplePickAndPlaceExpert(
-            #     task=self,
-            #     shortest_path_navigator=self.env.shortest_path_navigator,
-            # )
-            self.greedy_expert = SubTaskExpert(
-                task=self,
-                shortest_path_navigator=self.env.shortest_path_navigator,
-            )
+    #         # self.greedy_expert = GreedySimplePickAndPlaceExpert(
+    #         #     task=self,
+    #         #     shortest_path_navigator=self.env.shortest_path_navigator,
+    #         # )
+    #         self.greedy_expert = SubTaskExpert(
+    #             task=self,
+    #             shortest_path_navigator=self.env.shortest_path_navigator,
+    #         )
             
-        action = self.greedy_expert.expert_action
-        if action is None:
-            return 0, False
-        else:
-            return action, True
+    #     action = self.greedy_expert.expert_action
+    #     if action is None:
+    #         return 0, False
+    #     else:
+    #         return action, True
 
     def metrics(self) -> Dict[str, Any]:
         if not self.is_done():

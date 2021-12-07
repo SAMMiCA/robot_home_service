@@ -855,7 +855,9 @@ class SubTaskExpert:
         assert self.task.num_steps_taken() == 0
 
         self.expert_action_list: List[int] = []
-        self.goto_action_list: List[str] = []
+        self.goto_action_list: List[str] = ["RotateRight" for _ in range(4)]
+        self.check_room_type_done: bool = False
+        self.require_check_room_type: bool = True
 
         self._last_to_interact_object_pose: Optional[Dict[str, Any]] = None
         self.map_oracle = True
@@ -893,6 +895,7 @@ class SubTaskExpert:
             action_str = action_names[action_taken]
 
             was_nav_action = any(k in action_str for k in ['move', 'rotate', 'look'])
+            was_goto_action = 'goto' in action_str
 
             if not action_success:
                 if was_nav_action:
@@ -911,30 +914,36 @@ class SubTaskExpert:
                 #         obj_pose=self._last_to_interact_object_pose,
                 #     )
                 #     self.task.rollback_subtask()
+                elif was_goto_action:
+                    # Reset Fail?
+                    raise RuntimeError
+
                 elif (
                     action_str == "pickup"
                 ) and action_taken == last_expert_action:
-                    assert self._last_to_interact_object_pose is not None
+                    if self.task.env.scene == self.task.env.current_task_spec.target_scene:
+                        assert self._last_to_interact_object_pose is not None
                     self._invalidate_interactable_loc_for_pose(
                         location=self.task.env.get_agent_location(),
                         obj_pose=self._last_to_interact_object_pose,
                     )
-                    self.task.rollback_subtask()
 
                 elif (
                     action_str == "put"
                 ) and action_taken == last_expert_action:
-                    assert self._last_to_interact_object_pose is not None
+                    if self.task.env.scene == self.task.env.current_task_spec.target_scene:
+                        assert self._last_to_interact_object_pose is not None
                     self._invalidate_interactable_loc_for_pose(
                         location=self.task.env.get_agent_location(),
                         obj_pose=self._last_to_interact_object_pose,
                     )
-                    self.task.rollback_subtask()
 
                 elif (
                     ("crouch" in action_str or "stand" in action_str) 
                     and action_taken == last_expert_action
                 ):
+                    if self.task.env.scene == self.task.env.current_task_spec.target_scene:
+                        assert self._last_to_interact_object_pose is not None
                     agent_loc = self.task.env.get_agent_location()
                     agent_loc["standing"] = not agent_loc["standing"]
                     self._invalidate_interactable_loc_for_pose(
@@ -953,14 +962,26 @@ class SubTaskExpert:
                     if action_str == "pickup":
                         held_object = self.task.env.held_object
                         if held_object is None:
-                            self.task.rollback_subtask()
+                            raise RuntimeError(
+                                f"Impossible..."
+                            )
                         elif held_object["objectType"] != self._last_to_interact_object_pose["objectType"]:
-                            self.task.rollback_subtask()
+                            raise RuntimeError(
+                                f"Impossible......"
+                            )
                         else:
                             self._last_to_interact_object_pose = None
                     elif action_str == "put":
                         assert self.task.env.held_object is None
                         self._last_to_interact_object_pose = None
+                    
+                    elif was_goto_action:
+                        self.require_check_room_type = True
+                        self.goto_action_list = ["RotateRight" for _ in range(4)]
+                        # If current subtask is not GOTO, rollback subtasks to GOTO
+                        if self.task.current_subtask[0] != "Goto":
+                            while self.task.current_subtask[0] == "Goto":
+                                self.task.rollback_subtask()
 
         self._generate_and_record_expert_action()
 
@@ -984,28 +1005,38 @@ class SubTaskExpert:
         self,
         scene_type: str
     ) -> Optional[str]:
-        if len(self.goto_action_list) == 0:
-            if not self.task._1st_check:
-                for _ in range(4):
-                    self.goto_action_list.append("RotateRight")
-                self.task._1st_check = True
-            else:
-                if not self.task._took_goto_action:
-                    self.goto_action_list.append(f"Goto{scene_type}")
-                elif not self.task._2nd_check:
-                    for _ in range(4):
-                        self.goto_action_list.append("RotateRight")
-                    self.task._2nd_check = True
+        # if len(self.goto_action_list) == 0:
+        #     if not self.task._1st_check:
+        #         for _ in range(4):
+        #             self.goto_action_list.append("RotateRight")
+        #         self.task._1st_check = True
+        #     else:
+        #         if not self.task._took_goto_action:
+        #             self.goto_action_list.append(f"Goto{scene_type}")
+        #         elif not self.task._2nd_check:
+        #             for _ in range(4):
+        #                 self.goto_action_list.append("RotateRight")
+        #             self.task._2nd_check = True
 
-        goto_action = self.goto_action
-        if len(self.goto_action_list) == 0:
-            if self.task._2nd_check:
-                self.task._check_goto_done = True
-            elif self.task._1st_check and (
-                SCENE_TO_SCENE_TYPE[self.task.env.scene] == scene_type
-            ):
-                self.task._check_goto_done = True
-        
+        # goto_action = self.goto_action
+        # if len(self.goto_action_list) == 0:
+        #     if self.task._2nd_check:
+        #         self.task._check_goto_done = True
+        #     elif self.task._1st_check and (
+        #         SCENE_TO_SCENE_TYPE[self.task.env.scene] == scene_type
+        #     ):
+        #         self.task._check_goto_done = True
+        if len(self.goto_action_list) > 0:
+            self.check_room_type_done = False
+            goto_action = self.goto_action
+            if len(self.goto_action_list) == 0:
+                self.check_room_type_done = True
+                self.require_check_room_type = False
+
+        else:
+            goto_action = f"Goto{scene_type}"
+            self.require_check_room_type = True
+
         return goto_action
 
     def _expert_nav_action_to_obj(
@@ -1256,7 +1287,8 @@ class SubTaskExpert:
                     target_obj = next(
                         (o for o in current_objects if o['objectType'] == subtask_target), None
                     )
-            # assert target_obj is not None
+
+            assert target_obj is not None
             self._last_to_interact_object_pose = target_obj
             expert_nav_action = self._expert_nav_action_to_obj(
                 obj=target_obj
@@ -1293,12 +1325,11 @@ class SubTaskExpert:
                     
                     else:
                         return dict(action="Fail")
-                else:
-                    return dict(action="Fail")
-            elif expert_nav_action == "Fail":
-                return dict(action=expert_nav_action)
-            else:
-                return dict(action=expert_nav_action)
+                
+            # elif expert_nav_action == "Fail":
+            #     return dict(action=expert_nav_action)
+            
+            return dict(action=expert_nav_action)
 
         elif subtask_action == "Pickup":
             # if env.scene != env.current_task_spec.target_scene:
@@ -1316,7 +1347,7 @@ class SubTaskExpert:
                     target_obj = next(
                         (o for o in current_objects if o['objectType'] == subtask_target), None
                     )
-            # assert target_obj is not None and target_obj['visible']
+            assert target_obj is not None and target_obj['visible']
             self._last_to_interact_object_pose = target_obj
             # return dict(action="Pickup", objectType=target_obj["objectType"])
             return dict(action="Pickup")
@@ -1349,8 +1380,8 @@ class SubTaskExpert:
             #         self.task.rollback_subtask()
             #     return dict(action="Pass")
             
-            # assert target_obj is not None and held_object["objectId"] == target_obj["objectId"]
-            # assert place_obj is not None and place_obj["visible"]
+            assert target_obj is not None and held_object["objectId"] == target_obj["objectId"]
+            assert place_obj is not None and place_obj["visible"]
             self._last_to_interact_object_pose = place_obj
             # return dict(action="PutByType", objectType=place_obj["objectType"])
             return dict(action="Put")
