@@ -23,7 +23,7 @@ from env.environment import (
     HomeServiceTaskSpec,
 )
 from env.expert import (
-    GreedySimplePickAndPlaceExpert,
+    # GreedySimplePickAndPlaceExpert,
     ShortestPathNavigatorTHOR,
     SubTaskExpert,
 )
@@ -101,8 +101,9 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         self._took_end_action: bool = False
         # self._took_goto_action: bool = False
         # self._check_goto_done: bool = False
-        self._1st_check: bool = False
-        self._2nd_check: bool = False
+        # self._1st_check: bool = False
+        # self._2nd_check: bool = False
+        self._took_subtask_rollback: bool = False
         self._init_position_change_sensor: bool = False
 
         self._target_positions: Dict[str, np.ndarray] = {}
@@ -177,6 +178,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
 
     def rollback_subtask(self):
         self._subtask_step -= 1
+        self._took_subtask_rollback = True
 
     def subtask_succeeded(self):
         self._subtask_step += 1
@@ -290,19 +292,23 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
     def query_planner(self):
         return []
 
-    def _judge(self, obs, action, next_obs, action_success, subtask_done) -> float:
+    def _judge(self, obs, action, next_obs, action_success, current_subtask, subtask_done) -> float:
         """Return the reward from a new (s, a, s')."""
         action_name = self.action_names()[action]
-        reward = -0.01
+        reward = -0.04
         if subtask_done:
             reward += 1
 
-        if self.current_subtask[0] == "Done":
+        if current_subtask[0] == "Done":
             reward += 5
-        elif self.current_subtask[0] != "Goto":
+        elif current_subtask[0] != "Goto":
             if action_name.startswith("goto"):
                 # Wrongly moved to other room type
                 reward -= 10
+        
+        if self._took_subtask_rollback:
+            reward -= 0.95
+            self._took_subtask_rollback = False
 
         return reward
 
@@ -631,8 +637,11 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         self.subtask_info.append(self.current_subtask)
         if self.task_spec_in_metrics:
             self.agent_locs.append(self.env.get_agent_location())
-        
+
+        # print(f'step {self.num_steps_taken()} | current subtask {self.current_subtask} | action_taken {action_name} | action taken success {action_success}', end=" | ")
+        current_subtask = self.current_subtask
         subtask_done = self.is_current_subtask_done()
+        # print(f'subtask_done {subtask_done}')
         # self._obs = self.get_observations()
 
         return RLStepResult(
@@ -642,6 +651,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
                 action=action,
                 next_obs=None,
                 action_success=action_success,
+                current_subtask=current_subtask,
                 subtask_done=subtask_done
             ),
             done=self.is_done(),
@@ -673,7 +683,7 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
         **init_kwargs,
     ):
         super().__init__(**init_kwargs)
-        self.greedy_expert: Optional[GreedySimplePickAndPlaceExpert] = None
+        self.greedy_expert: Optional[SubTaskExpert] = None
 
     def query_planner(self, **kwargs) -> Sequence[Tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]]:
         """

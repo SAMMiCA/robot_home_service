@@ -438,7 +438,7 @@ def _are_agent_locations_equal(
     )
 
 
-class GreedySimplePickAndPlaceExpert:
+# class GreedySimplePickAndPlaceExpert:
     """An agent which greedily attempts to complete a given unshuffle task."""
 
     def __init__(
@@ -927,6 +927,10 @@ class SubTaskExpert:
                         location=self.task.env.get_agent_location(),
                         obj_pose=self._last_to_interact_object_pose,
                     )
+                    # After invalidate current agent location, re-navigate to the object
+                    if self.task.current_subtask[0] != "Navigate":
+                        while self.task.current_subtask[0] != "Navigate":
+                            self.task.rollback_subtask()
 
                 elif (
                     action_str == "put"
@@ -937,6 +941,13 @@ class SubTaskExpert:
                         location=self.task.env.get_agent_location(),
                         obj_pose=self._last_to_interact_object_pose,
                     )
+                    # After invalidate current agent location, re-navigate to the object
+                    if self.task.current_subtask[0] != "Navigate":
+                        # print("  > rollback subtask to navigate")
+                        while self.task.current_subtask[0] != "Navigate":
+                            self.task.rollback_subtask()
+                    
+                    # print(f'updated subtask {self.task.current_subtask}')
 
                 elif (
                     ("crouch" in action_str or "stand" in action_str) 
@@ -980,7 +991,7 @@ class SubTaskExpert:
                         self.goto_action_list = ["RotateRight" for _ in range(4)]
                         # If current subtask is not GOTO, rollback subtasks to GOTO
                         if self.task.current_subtask[0] != "Goto":
-                            while self.task.current_subtask[0] == "Goto":
+                            while self.task.current_subtask[0] != "Goto":
                                 self.task.rollback_subtask()
 
         self._generate_and_record_expert_action()
@@ -1197,6 +1208,8 @@ class SubTaskExpert:
             if "objectType" in expert_action_dict:
                 obj_type = stringcase.snakecase(expert_action_dict["objectType"])
                 action_str = f"{action_str}_{obj_type}"
+            elif action_str == "fail":
+                action_str = "pass"
 
         try:
             self.expert_action_list.append(self.task.action_names().index(action_str))
@@ -1324,6 +1337,7 @@ class SubTaskExpert:
                     # raise RuntimeError(" IMPOSSIBLE. ")
                     
                     else:
+                        # print(f'invalidate failed')
                         return dict(action="Fail")
                 
             # elif expert_nav_action == "Fail":

@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-VISIBILITY_DISTANCE = 2.0
+VISIBILITY_DISTANCE = 1.5
 MAX_HAND_METERS = 1.0
 FOV = 90
 
