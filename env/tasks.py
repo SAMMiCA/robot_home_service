@@ -16,7 +16,7 @@ from allenact.base_abstractions.sensor import SensorSuite
 from allenact.base_abstractions.task import Task, TaskSampler
 from allenact.utils.system import get_logger
 from allenact_plugins.ithor_plugin.ithor_util import round_to_factor
-from env.constants import DEFAULT_COMPATIBLE_RECEPTACLES, OBJECT_TYPES_WITH_PROPERTIES, SCENE_TO_SCENE_TYPE, STARTER_HOME_SERVICE_DATA_DIR, STARTER_HOME_SERVICE_SIMPLE_PICK_AND_PLACE_DATA_DIR, STARTER_REARRANGE_DATA_DIR, STEP_SIZE
+from env.constants import DEFAULT_COMPATIBLE_RECEPTACLES, OBJECT_TYPES_WITH_PROPERTIES, SCENE_TO_SCENE_TYPE, STARTER_HOME_SERVICE_DATA_DIR, STARTER_HOME_SERVICE_SIMPLE_PICK_AND_PLACE_DATA_DIR, STARTER_REARRANGE_DATA_DIR, STEP_SIZE, VISIBILITY_DISTANCE
 from env.environment import (
     HomeServiceSimpleTaskOrderTaskSpec,
     HomeServiceTHOREnvironment,
@@ -185,61 +185,71 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
 
     def is_current_subtask_done(self):
         subtask_action, subtask_target, subtask_place = self.current_subtask
-        metadata = self.env.last_event.metadata
+        
         if subtask_action == "Done":
             return True
 
         elif subtask_action == "Navigate":
-            assert subtask_place is None
-            cur_subtask_target = next(
-                (o for o in metadata["objects"] if o["objectType"] == subtask_target), None
-            )
-            
-            if self.env.scene == self.env.current_task_spec.target_scene:
-                assert cur_subtask_target is not None
+            with include_object_data(self.env.controller):
+                metadata = self.env.last_event.metadata
+                assert subtask_place is None
+                cur_subtask_target = next(
+                    (o for o in metadata["objects"] if o["objectType"] == subtask_target), None
+                )
+                
+                if self.env.scene == self.env.current_task_spec.target_scene:
+                    assert cur_subtask_target is not None
 
-                if cur_subtask_target["visible"]:
-                    self.subtask_succeeded()
-                    return True
+                    if cur_subtask_target["visible"] and cur_subtask_target["distance"] < VISIBILITY_DISTANCE:
+                        print(f'cur_subtask_target in navigate success')
+                        print(f'visible: {cur_subtask_target["visible"]} | distance: {cur_subtask_target["distance"]}')
+                        self.subtask_succeeded()
+                        return True
 
         elif subtask_action == "Pickup":
-            assert subtask_place is None
-            if metadata["lastActionSuccess"] and (
-                metadata["lastAction"] == f"{subtask_action}Object"
-            ) and (
-                self.env.held_object["objectType"] == subtask_target
-            ):
-                self.subtask_succeeded()
-                return True
-
-        elif subtask_action in ["Open", "Close"]:
-            assert subtask_place is None
-            if metadata["lastActionSuccess"] and (
-                metadata["lastAction"] == f"{subtask_action}Object"
-            ):
-                self.subtask_succeeded()
-                return True
-
-        elif subtask_action == "Put":
-            assert subtask_place is not None
-            cur_subtask_target = next(
-                (o for o in metadata["objects"] if o["objectType"] == subtask_target), None
-            )
-            cur_subtask_place = next(
-                (o for o in metadata["objects"] if o["objectType"] == subtask_place), None
-            )
-            if self.env.scene == self.env.current_task_spec.target_scene:
-                assert cur_subtask_target is not None
-                assert cur_subtask_place is not None
-
+            with include_object_data(self.env.controller):
+                metadata = self.env.last_event.metadata
+                assert subtask_place is None
                 if metadata["lastActionSuccess"] and (
                     metadata["lastAction"] == f"{subtask_action}Object"
                 ) and (
-                    self.env.held_object is None
+                    self.env.held_object["objectType"] == subtask_target
                 ):
-                    if cur_subtask_place["objectId"] in cur_subtask_target["parentReceptacles"]:
-                        self.subtask_succeeded()
-                        return True
+                    self.subtask_succeeded()
+                    return True
+
+        elif subtask_action in ["Open", "Close"]:
+            with include_object_data(self.env.controller):
+                metadata = self.env.last_event.metadata
+                assert subtask_place is None
+                if metadata["lastActionSuccess"] and (
+                    metadata["lastAction"] == f"{subtask_action}Object"
+                ):
+                    self.subtask_succeeded()
+                    return True
+
+        elif subtask_action == "Put":
+            with include_object_data(self.env.controller):
+                metadata = self.env.last_event.metadata
+                assert subtask_place is not None
+                cur_subtask_target = next(
+                    (o for o in metadata["objects"] if o["objectType"] == subtask_target), None
+                )
+                cur_subtask_place = next(
+                    (o for o in metadata["objects"] if o["objectType"] == subtask_place), None
+                )
+                if self.env.scene == self.env.current_task_spec.target_scene:
+                    assert cur_subtask_target is not None
+                    assert cur_subtask_place is not None
+
+                    if metadata["lastActionSuccess"] and (
+                        metadata["lastAction"] == f"{subtask_action}Object"
+                    ) and (
+                        self.env.held_object is None
+                    ):
+                        if cur_subtask_place["objectId"] in cur_subtask_target["parentReceptacles"]:
+                            self.subtask_succeeded()
+                            return True
 
         elif subtask_action == "Goto":
             # TODO
@@ -247,11 +257,13 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
             # return True
             
             # ORACLE
-            if self.greedy_expert.check_room_type_done:
-                if metadata["lastActionSuccess"] and SCENE_TO_SCENE_TYPE[self.env.scene] == subtask_target:
-                    if not self.greedy_expert.require_check_room_type:
-                        self.subtask_succeeded()
-                        return True
+            with include_object_data(self.env.controller):
+                metadata = self.env.last_event.metadata
+                if self.greedy_expert.check_room_type_done:
+                    if metadata["lastActionSuccess"] and SCENE_TO_SCENE_TYPE[self.env.scene] == subtask_target:
+                        if not self.greedy_expert.require_check_room_type:
+                            self.subtask_succeeded()
+                            return True
         
         elif subtask_action == "Scan":
             # TODO
