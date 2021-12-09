@@ -1014,6 +1014,11 @@ class SubTaskExpert:
                         if self.task.current_subtask[0] != "Goto":
                             while self.task.current_subtask[0] != "Goto":
                                 self.task.rollback_subtask()
+                    elif "crouch" in action_str or "stand" in action_str:
+                        # took crouch/stand action in pickup/put subtask
+                        # should navigate to target again
+                        while self.task.current_subtask[0] != "Navigate":
+                            self.task.rollback_subtask()
                 else:
                     if self.task.current_subtask[0] in ("Pickup", "Put"):
                         # took nav action in pickup/put subtask
