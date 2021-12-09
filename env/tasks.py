@@ -201,8 +201,8 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
                     assert cur_subtask_target is not None
 
                     if cur_subtask_target["visible"] and cur_subtask_target["distance"] < VISIBILITY_DISTANCE:
-                        print(f'cur_subtask_target in navigate success')
-                        print(f'visible: {cur_subtask_target["visible"]} | distance: {cur_subtask_target["distance"]}')
+                        # print(f'cur_subtask_target in navigate success')
+                        # print(f'visible: {cur_subtask_target["visible"]} | distance: {cur_subtask_target["distance"]}')
                         self.subtask_succeeded()
                         return True
 

@@ -29,7 +29,7 @@ from allenact_plugins.ithor_plugin.ithor_util import (
     round_to_factor,
     include_object_data,
 )
-from env.constants import NOT_PROPER_RECEPTACLES, SCENE_TO_SCENE_TYPE, STEP_SIZE
+from env.constants import NOT_PROPER_RECEPTACLES, SCENE_TO_SCENE_TYPE, STEP_SIZE, VISIBILITY_DISTANCE
 from env.environment import (
     HomeServiceTHOREnvironment,
     HomeServiceMode,
@@ -898,23 +898,25 @@ class SubTaskExpert:
             was_goto_action = 'goto' in action_str
 
             if self.task.current_subtask[0] == "Pickup":
-                with include_object_data(self.task.env.controller):
-                    md = self.task.env.last_event.metadata
-                    cur_subtask_target = next(
-                        (o for o in md["objects"] if o["objectType"] == self.task.current_subtask[1]), None
-                    )
+                if self.task.env.scene == self.task.env.current_task_spec.target_scene:
+                    with include_object_data(self.task.env.controller):
+                        md = self.task.env.last_event.metadata
+                        cur_subtask_target = next(
+                            (o for o in md["objects"] if o["objectType"] == self.task.current_subtask[1]), None
+                        )
 
-                    print(f'cur_subtask_target in AFTER navigate success in update()')
-                    print(f'visible: {cur_subtask_target["visible"]} | distance: {cur_subtask_target["distance"]}')
+                        # print(f'cur_subtask_target in AFTER navigate success in update()')
+                        # print(f'visible: {cur_subtask_target["visible"]} | distance: {cur_subtask_target["distance"]}')
             elif self.task.current_subtask[0] == "Put":
-                with include_object_data(self.task.env.controller):
-                    md = self.task.env.last_event.metadata
-                    cur_subtask_place = next(
-                        (o for o in md["objects"] if o["objectType"] == self.task.current_subtask[2]), None
-                    )
+                if self.task.env.scene == self.task.env.current_task_spec.target_scene:
+                    with include_object_data(self.task.env.controller):
+                        md = self.task.env.last_event.metadata
+                        cur_subtask_place = next(
+                            (o for o in md["objects"] if o["objectType"] == self.task.current_subtask[2]), None
+                        )
 
-                    print(f'cur_subtask_place in AFTER navigate success in update()')
-                    print(f'visible: {cur_subtask_place["visible"]} | distance: {cur_subtask_place["distance"]}')
+                        # print(f'cur_subtask_place in AFTER navigate success in update()')
+                        # print(f'visible: {cur_subtask_place["visible"]} | distance: {cur_subtask_place["distance"]}')
 
             if not action_success:
                 if was_nav_action:
@@ -1111,6 +1113,8 @@ class SubTaskExpert:
                 d = round(abs(agent_x - gdl["x"]) + abs(agent_z - gdl["z"]), 2)
                 if d <= 1e-2:
                     if _are_agent_locations_equal(agent_loc, gdl, ignore_standing=True):
+                        # print("????")
+                        # print(f'agent_loc: {agent_loc} | gdl: {gdl}')
                         if agent_loc["standing"] != gdl["standing"]:
                             return "Crouch" if agent_loc["standing"] else "Stand"
                         else:
@@ -1228,6 +1232,7 @@ class SubTaskExpert:
                 obj_type = stringcase.snakecase(expert_action_dict["objectType"])
                 action_str = f"{action_str}_{obj_type}"
             elif action_str == "fail":
+                # print("fail?")
                 action_str = "pass"
 
         try:
@@ -1347,7 +1352,9 @@ class SubTaskExpert:
                 return dict(action=expert_nav_action)
             elif expert_nav_action == "Pass":
                 # retry = 0
-                if not target_obj["visible"]:
+                # print('aaaa')
+                # print(f'target_obj: {target_obj["objectType"]} | visible: {target_obj["visible"]} | distance: {target_obj["distance"]}')
+                if not target_obj["visible"] or target_obj["distance"] > VISIBILITY_DISTANCE:
                     if self._invalidate_interactable_loc_for_pose(
                         location=agent_loc, obj_pose=target_obj
                     ):
@@ -1380,15 +1387,12 @@ class SubTaskExpert:
                     target_obj = next(
                         (o for o in current_objects if o['objectType'] == subtask_target), None
                     )
-            if target_obj is None:
-                print('target_obj is None!!')
-                
+            # if target_obj is None:
+            #     print('target_obj is None!!')
+            # elif not target_obj['visible']:
+            #     print('target_obj["visible"] is False!!!')
 
-            elif not target_obj['visible']:
-                print('target_obj["visible"] is False!!!')
-                
-
-            assert target_obj is not None and target_obj['visible'], f"task_spec: {self.task.env.current_task_spec}\ntarget_obj: {target_obj} \n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}"
+            assert target_obj is not None and target_obj['visible'], f"target_obj: {target_obj} \n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}"
             self._last_to_interact_object_pose = target_obj
             # return dict(action="Pickup", objectType=target_obj["objectType"])
             return dict(action="Pickup")
@@ -1428,21 +1432,21 @@ class SubTaskExpert:
             #         self.task.rollback_subtask()
             #     return dict(action="Pass")
             
-            if target_obj is None:
-                print('target_obj is None!!')
-            elif held_object is None:
-                print('held_object is None!!')
-            elif held_object["objectId"] != target_obj["objectId"]:
-                print(f"held_object_id: {held_object['objectId']} | target_obj_id: {target_obj['objectId']}")
+            # if target_obj is None:
+            #     print('target_obj is None!!')
+            # elif held_object is None:
+            #     print('held_object is None!!')
+            # elif held_object["objectId"] != target_obj["objectId"]:
+            #     print(f"held_object_id: {held_object['objectId']} | target_obj_id: {target_obj['objectId']}")
 
-            assert target_obj is not None and held_object["objectId"] == target_obj["objectId"], f"task_spec: {self.task.env.current_task_spec}\ntarget_obj: {target_obj} | held_object: {held_object}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}"
+            assert target_obj is not None and held_object["objectId"] == target_obj["objectId"], f"target_obj: {target_obj} | held_object: {held_object}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}"
 
-            if place_obj is None:
-                print('place_obj is None!!')
-            elif not place_obj['visible']:
-                print('place_obj["visible"] is False!!!!')
+            # if place_obj is None:
+            #     print('place_obj is None!!')
+            # elif not place_obj['visible']:
+            #     print('place_obj["visible"] is False!!!!')
 
-            assert place_obj is not None and place_obj["visible"], f"task_spec: {self.task.env.current_task_spec}\place_obj: {place_obj}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}"
+            assert place_obj is not None and place_obj["visible"], f"place_obj: {place_obj}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}"
             self._last_to_interact_object_pose = place_obj
             # return dict(action="PutByType", objectType=place_obj["objectType"])
             return dict(action="Put")
