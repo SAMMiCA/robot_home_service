@@ -323,17 +323,22 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
 
         if current_subtask[0] == "Done":
             if action_name == "done":
-                reward += 5
+                reward += 10
             else:
                 # should take "done" when all the task is done
                 reward += -10
-        elif current_subtask[0] != "Goto":
-            if action_name.startswith("goto"):
-                # Wrongly moved to other room type
+        else:
+            # If "done" action taken when it is not "Done" subtask
+            if action_name == "done":
                 reward += -10
+
+            if current_subtask[0] != "Goto":
+                if action_name.startswith("goto"):
+                    # Wrongly moved to other room type
+                    reward += -10
         
         if self._took_subtask_rollback:
-            reward += -1.5 * self._rollback_count
+            reward += -1 * self._rollback_count
             self._took_subtask_rollback = False
             self._rollback_count = 0
 
@@ -856,7 +861,7 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
         # print(f'unique_id: {task_info["unique_id"]}')
         # print(f'action_taken: {self.actions_taken}')
         # print(f'actions_taken_success: {self.actions_taken_success}')
-        # print(f'rewards: {self.task.rewards}')
+        # print(f'rewards: {self.rewards}')
 
         return metrics
 

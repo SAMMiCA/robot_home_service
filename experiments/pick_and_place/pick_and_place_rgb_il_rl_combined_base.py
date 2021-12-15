@@ -113,10 +113,12 @@ class PickAndPlaceRGBILRLCombinedBaseExperimentConfig(PickAndPlaceRGBBaseExperim
                             (dagger_steps / 2, 0.0)
                         ]
                     ),
+                    loss_weights=[1.0, 10.0]
                 ),
                 PipelineStage(
                     loss_names=["ppo_loss"],
                     max_stage_steps=training_steps - dagger_steps - bc_tf1_steps,
+                    loss_weights=[10.0]
                 )
             ],
             **params
