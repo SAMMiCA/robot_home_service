@@ -86,7 +86,7 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
 
     # Training parameters
     TRAINING_STEPS = int(25e6)
-    SAVE_INTERVAL = int(5e4)
+    SAVE_INTERVAL = int(1e5)
     USE_RESNET_CNN = False
 
     # Sensor info

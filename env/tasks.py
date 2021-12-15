@@ -104,6 +104,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         # self._1st_check: bool = False
         # self._2nd_check: bool = False
         self._took_subtask_rollback: bool = False
+        self._rollback_count: int = 0
         self._init_position_change_sensor: bool = False
 
         self._target_positions: Dict[str, np.ndarray] = {}
@@ -119,6 +120,7 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
 
         self.actions_taken = []
         self.actions_taken_success = []
+        self.rewards = []
         self.subtask_info = [self.current_subtask]
         self.agent_locs = [self.env.get_agent_location()]
 
@@ -177,11 +179,14 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         return self._subtask_step
 
     def rollback_subtask(self):
-        self._subtask_step -= 1
-        self._took_subtask_rollback = True
+        if self._subtask_step > 0:
+            self._subtask_step -= 1
+            self._took_subtask_rollback = True
+            self._rollback_count += 1
 
     def subtask_succeeded(self):
         self._subtask_step += 1
+        assert self._subtask_step < self.num_subtasks + 1
 
     def is_current_subtask_done(self):
         subtask_action, subtask_target, subtask_place = self.current_subtask
@@ -257,14 +262,16 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
             # return True
             
             # ORACLE
-            with include_object_data(self.env.controller):
-                metadata = self.env.last_event.metadata
-                if self.greedy_expert.check_room_type_done:
-                    if metadata["lastActionSuccess"] and SCENE_TO_SCENE_TYPE[self.env.scene] == subtask_target:
-                        if not self.greedy_expert.require_check_room_type:
-                            self.subtask_succeeded()
-                            return True
-        
+            metadata = self.env.last_event.metadata
+            if (
+                metadata["lastActionSuccess"]
+                and SCENE_TO_SCENE_TYPE[self.env.scene] == subtask_target
+                and self.greedy_expert.check_room_type_done
+                and not self.greedy_expert.require_check_room_type
+            ):
+                self.subtask_succeeded()
+                return True
+
         elif subtask_action == "Scan":
             # TODO
             self.subtask_succeeded()
@@ -307,20 +314,28 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
     def _judge(self, obs, action, next_obs, action_success, current_subtask, subtask_done) -> float:
         """Return the reward from a new (s, a, s')."""
         action_name = self.action_names()[action]
-        reward = -0.04
+        reward = -0.05
+        if not action_success:
+            reward += -0.05
+
         if subtask_done:
             reward += 1
 
         if current_subtask[0] == "Done":
-            reward += 5
+            if action_name == "done":
+                reward += 5
+            else:
+                # should take "done" when all the task is done
+                reward += -10
         elif current_subtask[0] != "Goto":
             if action_name.startswith("goto"):
                 # Wrongly moved to other room type
-                reward -= 10
+                reward += -10
         
         if self._took_subtask_rollback:
-            reward -= 0.95
+            reward += -1.5 * self._rollback_count
             self._took_subtask_rollback = False
+            self._rollback_count = 0
 
         return reward
 
@@ -630,14 +645,19 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         elif action_name.startswith("goto"):
             scene_type = "_".join(action_name.split("_")[1:])
             assert scene_type in ("kitchen", "living_room", "bedroom", "bathroom")
-            self.env.reset(
-                task_spec=self.env.current_task_spec,
-                force_axis_aligned_start=self.force_axis_aligned_start,
-                scene_type=stringcase.pascalcase(scene_type)
-            )
-            action_success = self.env.last_event.metadata['lastActionSuccess']
-            if action_success:
-                self.require_init_position_sensor = True
+            if SCENE_TO_SCENE_TYPE[self.env.scene] == scene_type:
+                action_success = False
+            else:
+                self.env.reset(
+                    task_spec=self.env.current_task_spec,
+                    force_axis_aligned_start=self.force_axis_aligned_start,
+                    scene_type=stringcase.pascalcase(scene_type)
+                )
+                action_success = self.env.last_event.metadata['lastActionSuccess']
+                if action_success:
+                    self.require_init_position_sensor = True
+                    if self.greedy_expert is not None:
+                        self.greedy_expert.require_check_room_type = True
             #     self._took_goto_action = True
         else:
             raise RuntimeError(
@@ -655,17 +675,19 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         subtask_done = self.is_current_subtask_done()
         # print(f'subtask_done {subtask_done}')
         # self._obs = self.get_observations()
+        reward = self._judge(
+            obs=None,
+            action=action,
+            next_obs=None,
+            action_success=action_success,
+            current_subtask=current_subtask,
+            subtask_done=subtask_done
+        )
+        self.rewards.append(reward)
 
         return RLStepResult(
             observation=None,
-            reward=self._judge(
-                obs=None,
-                action=action,
-                next_obs=None,
-                action_success=action_success,
-                current_subtask=current_subtask,
-                subtask_done=subtask_done
-            ),
+            reward=reward,
             done=self.is_done(),
             info={"action_name": action_name, "action_success": action_success},
         )
@@ -830,6 +852,11 @@ class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
             "task_info": task_info,
             **metrics,
         }
+        # print(f'subtask_info: {self.subtask_info}')
+        # print(f'unique_id: {task_info["unique_id"]}')
+        # print(f'action_taken: {self.actions_taken}')
+        # print(f'actions_taken_success: {self.actions_taken_success}')
+        # print(f'rewards: {self.task.rewards}')
 
         return metrics
 

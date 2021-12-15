@@ -2,7 +2,7 @@ from experiments.pick_and_place.pick_and_place_rgb_il_rl_combined_base import Pi
 
 class PickAndPlaceRGBResNetILRLCombinedExperimentConfig(PickAndPlaceRGBILRLCombinedBaseExperimentConfig):
     USE_RESNET_CNN = True
-    IL_PIPELINE_TYPE = "20proc"
+    IL_PIPELINE_TYPE = "20proc-longtf"
 
     @classmethod
     def tag(cls) -> str:

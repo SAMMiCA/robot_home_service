@@ -896,27 +896,28 @@ class SubTaskExpert:
 
             was_nav_action = any(k in action_str for k in ['move', 'rotate', 'look'])
             was_goto_action = 'goto' in action_str
+            if self.task.current_subtask[0] == "Done":
+                return self._generate_and_record_expert_action()
+            # if self.task.current_subtask[0] == "Pickup":
+            #     if self.task.env.scene == self.task.env.current_task_spec.target_scene:
+            #         with include_object_data(self.task.env.controller):
+            #             md = self.task.env.last_event.metadata
+            #             cur_subtask_target = next(
+            #                 (o for o in md["objects"] if o["objectType"] == self.task.current_subtask[1]), None
+            #             )
 
-            if self.task.current_subtask[0] == "Pickup":
-                if self.task.env.scene == self.task.env.current_task_spec.target_scene:
-                    with include_object_data(self.task.env.controller):
-                        md = self.task.env.last_event.metadata
-                        cur_subtask_target = next(
-                            (o for o in md["objects"] if o["objectType"] == self.task.current_subtask[1]), None
-                        )
+            #             print(f'cur_subtask_target in AFTER navigate success in update()')
+            #             print(f'visible: {cur_subtask_target["visible"]} | distance: {cur_subtask_target["distance"]}')
+            # elif self.task.current_subtask[0] == "Put":
+            #     if self.task.env.scene == self.task.env.current_task_spec.target_scene:
+            #         with include_object_data(self.task.env.controller):
+            #             md = self.task.env.last_event.metadata
+            #             cur_subtask_place = next(
+            #                 (o for o in md["objects"] if o["objectType"] == self.task.current_subtask[2]), None
+            #             )
 
-                        # print(f'cur_subtask_target in AFTER navigate success in update()')
-                        # print(f'visible: {cur_subtask_target["visible"]} | distance: {cur_subtask_target["distance"]}')
-            elif self.task.current_subtask[0] == "Put":
-                if self.task.env.scene == self.task.env.current_task_spec.target_scene:
-                    with include_object_data(self.task.env.controller):
-                        md = self.task.env.last_event.metadata
-                        cur_subtask_place = next(
-                            (o for o in md["objects"] if o["objectType"] == self.task.current_subtask[2]), None
-                        )
-
-                        # print(f'cur_subtask_place in AFTER navigate success in update()')
-                        # print(f'visible: {cur_subtask_place["visible"]} | distance: {cur_subtask_place["distance"]}')
+            #             print(f'cur_subtask_place in AFTER navigate success in update()')
+            #             print(f'visible: {cur_subtask_place["visible"]} | distance: {cur_subtask_place["distance"]}')
 
             if not action_success:
                 if was_nav_action:
@@ -992,33 +993,51 @@ class SubTaskExpert:
                     # ): 
                     #     self._last_to_interact_object_pose = None
                     if action_str == "pickup":
-                        held_object = self.task.env.held_object
-                        if held_object is None:
-                            raise RuntimeError(
-                                f"Impossible..."
-                            )
-                        elif held_object["objectType"] != self._last_to_interact_object_pose["objectType"]:
-                            raise RuntimeError(
-                                f"Impossible......"
-                            )
-                        else:
-                            self._last_to_interact_object_pose = None
-                    elif action_str == "put":
-                        assert self.task.env.held_object is None
-                        self._last_to_interact_object_pose = None
-                    
-                    elif was_goto_action:
-                        self.require_check_room_type = True
-                        self.goto_action_list = ["RotateRight" for _ in range(4)]
-                        # If current subtask is not GOTO, rollback subtasks to GOTO
-                        if self.task.current_subtask[0] != "Goto":
+                        if (
+                            agent_took_expert_action or 
+                            self.task.planned_task[self.task._subtask_step - 1][0] == "Pickup"
+                        ):
+                            held_object = self.task.env.held_object
+                            if held_object is None:
+                                raise RuntimeError(
+                                    f"Impossible..."
+                                )
+                            elif held_object["objectType"] != self._last_to_interact_object_pose["objectType"]:
+                                raise RuntimeError(
+                                    f"Impossible......"
+                                )
+                            else:
+                                self._last_to_interact_object_pose = None
+                        elif self.task.current_subtask[0] != "Goto":
+                            # unintended pickup action succeeded
                             while self.task.current_subtask[0] != "Goto":
                                 self.task.rollback_subtask()
+
+                    elif action_str == "put":
+                        if (
+                            agent_took_expert_action or 
+                            self.task.planned_task[self.task._subtask_step - 1][0] == "Put"
+                        ):
+                            assert self.task.env.held_object is None
+                            self._last_to_interact_object_pose = None
+                        elif self.task.current_subtask[0] != "Goto":
+                            while self.task.current_subtask[0] != "Goto":
+                                self.task.rollback_subtask()
+                    
+                    elif was_goto_action:
+                        if self.task.current_subtask[0] != "Goto":
+                            # If current subtask is not GOTO, rollback subtasks to GOTO
+                            while self.task.current_subtask[0] != "Goto":
+                                self.task.rollback_subtask()
+                        self.require_check_room_type = True
+                        self.goto_action_list = ["RotateRight" for _ in range(4)]
+
                     elif "crouch" in action_str or "stand" in action_str:
                         # took crouch/stand action in pickup/put subtask
                         # should navigate to target again
-                        while self.task.current_subtask[0] != "Navigate":
-                            self.task.rollback_subtask()
+                        if self.task.current_subtask[0] in ("Pickup", "Put"):
+                            while self.task.current_subtask[0] != "Navigate":
+                                self.task.rollback_subtask()
                 else:
                     if self.task.current_subtask[0] in ("Pickup", "Put"):
                         # took nav action in pickup/put subtask
@@ -1335,7 +1354,14 @@ class SubTaskExpert:
                     target_obj = next(
                         (o for o in current_objects if o['objectType'] == subtask_target), None
                     )
-
+            
+            if target_obj is None:
+                print('target_obj is None!!')
+                print(f'current scene: {self.task.env.scene} | target scene: {self.task.env.current_task_spec.target_scene}')
+                print(f"target_obj: {target_obj} \n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]} \n current_subtask: {self.task.current_subtask}")
+                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
+                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
+                print(f'rewards: {self.task.rewards}')
             assert target_obj is not None
             self._last_to_interact_object_pose = target_obj
             expert_nav_action = self._expert_nav_action_to_obj(
@@ -1398,12 +1424,20 @@ class SubTaskExpert:
                     target_obj = next(
                         (o for o in current_objects if o['objectType'] == subtask_target), None
                     )
-            # if target_obj is None:
-            #     print('target_obj is None!!')
-            # elif not target_obj['visible']:
-            #     print('target_obj["visible"] is False!!!')
+            if target_obj is None:
+                print('target_obj is None!!')
+                print(f"target_obj: {target_obj} \n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]} \n current_subtask: {self.task.current_subtask}")
+                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
+                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
+                print(f'rewards: {self.task.rewards}')
+            elif not target_obj['visible']:
+                print('target_obj["visible"] is False!!!')
+                print(f"target_obj: {target_obj} \n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]} \n current_subtask: {self.task.current_subtask}")
+                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
+                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
+                print(f'rewards: {self.task.rewards}')
 
-            assert target_obj is not None and target_obj['visible'], f"target_obj: {target_obj} \n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}"
+            assert target_obj is not None and target_obj['visible']
             self._last_to_interact_object_pose = target_obj
             # return dict(action="Pickup", objectType=target_obj["objectType"])
             return dict(action="Pickup")
@@ -1443,21 +1477,39 @@ class SubTaskExpert:
             #         self.task.rollback_subtask()
             #     return dict(action="Pass")
             
-            # if target_obj is None:
-            #     print('target_obj is None!!')
-            # elif held_object is None:
-            #     print('held_object is None!!')
-            # elif held_object["objectId"] != target_obj["objectId"]:
-            #     print(f"held_object_id: {held_object['objectId']} | target_obj_id: {target_obj['objectId']}")
+            if target_obj is None or held_object is None:
+                if target_obj is None:
+                    print('target_obj is None!!')
+                if held_object is None:
+                    print('held_object is None!!')
+                print(f"target_obj: {target_obj} | held_object: {held_object}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]} \n current_subtask: {self.task.current_subtask}")
+                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
+                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
+                print(f'rewards: {self.task.rewards}')
 
-            assert target_obj is not None and held_object["objectId"] == target_obj["objectId"], f"target_obj: {target_obj} | held_object: {held_object}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}"
+            elif held_object["objectId"] != target_obj["objectId"]:
+                print(f"held_object_id: {held_object['objectId']} | target_obj_id: {target_obj['objectId']}")
+                print(f"target_obj: {target_obj} | held_object: {held_object}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]} \n current_subtask: {self.task.current_subtask}")
+                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
+                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
+                print(f'rewards: {self.task.rewards}')
 
-            # if place_obj is None:
-            #     print('place_obj is None!!')
-            # elif not place_obj['visible']:
-            #     print('place_obj["visible"] is False!!!!')
+            assert target_obj is not None and held_object["objectId"] == target_obj["objectId"]
 
-            assert place_obj is not None and place_obj["visible"], f"place_obj: {place_obj}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}"
+            if place_obj is None:
+                print('place_obj is None!!')
+                print(f"place_obj: {place_obj}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]}")
+                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
+                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
+                print(f'rewards: {self.task.rewards}')
+            elif not place_obj['visible']:
+                print('place_obj["visible"] is False!!!!')
+                print(f"place_obj: {place_obj}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]}")
+                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
+                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
+                print(f'rewards: {self.task.rewards}')
+
+            assert place_obj is not None and place_obj["visible"]
             self._last_to_interact_object_pose = place_obj
             # return dict(action="PutByType", objectType=place_obj["objectType"])
             return dict(action="Put")
