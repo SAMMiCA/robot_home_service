@@ -993,10 +993,11 @@ class SubTaskExpert:
                     # ): 
                     #     self._last_to_interact_object_pose = None
                     if action_str == "pickup":
-                        if (
-                            agent_took_expert_action or 
-                            self.task.planned_task[self.task._subtask_step - 1][0] == "Pickup"
-                        ):
+                        # if (
+                        #     agent_took_expert_action or 
+                        #     self.task.planned_task[self.task._subtask_step - 1][0] == "Pickup"
+                        # ):
+                        if agent_took_expert_action:
                             held_object = self.task.env.held_object
                             if held_object is None:
                                 raise RuntimeError(
@@ -1014,10 +1015,11 @@ class SubTaskExpert:
                                 self.task.rollback_subtask()
 
                     elif action_str == "put":
-                        if (
-                            agent_took_expert_action or 
-                            self.task.planned_task[self.task._subtask_step - 1][0] == "Put"
-                        ):
+                        # if (
+                        #     agent_took_expert_action or 
+                        #     self.task.planned_task[self.task._subtask_step - 1][0] == "Put"
+                        # ):
+                        if agent_took_expert_action:
                             assert self.task.env.held_object is None
                             self._last_to_interact_object_pose = None
                         elif self.task.current_subtask[0] != "Goto":
