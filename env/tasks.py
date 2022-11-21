@@ -16,10 +16,9 @@ from allenact.base_abstractions.sensor import SensorSuite
 from allenact.base_abstractions.task import Task, TaskSampler
 from allenact.utils.system import get_logger
 from allenact_plugins.ithor_plugin.ithor_util import round_to_factor
-from env.constants import DEFAULT_COMPATIBLE_RECEPTACLES, OBJECT_TYPES_WITH_PROPERTIES, SCENE_TO_SCENE_TYPE, STARTER_HOME_SERVICE_DATA_DIR, STARTER_HOME_SERVICE_SIMPLE_PICK_AND_PLACE_DATA_DIR, STARTER_REARRANGE_DATA_DIR, STEP_SIZE, VISIBILITY_DISTANCE
+from env.constants import STARTER_HOME_SERVICE_DATA_DIR
 from env.environment import (
-    HomeServiceSimpleTaskOrderTaskSpec,
-    HomeServiceTHOREnvironment,
+    HomeServiceEnvironment,
     HomeServiceTaskSpec,
 )
 from env.expert import (
@@ -30,17 +29,11 @@ from env.expert import (
 from env.utils import (
     HomeServiceActionSpace,
     include_object_data,
+    get_pose_info
 )
 
-# from sEDM.test_edm import sEDM_model
 
-class HomeServiceTaskType(enum.Enum):
-
-    SIMPLE_PICK_AND_PLACE = "SimplePickAndPlace"
-    REARRANGE = "Rearrange"
-
-
-class AbstractHomeServiceTask(Task, ABC):
+class AbstractHomeServiceTask(Task[HomeServiceEnvironment], ABC):
     @staticmethod
     def agent_location_to_tuple(
         agent_loc: Dict[str, Union[Dict[str, float], bool, float, int]],
@@ -73,11 +66,13 @@ class AbstractHomeServiceTask(Task, ABC):
         )
 
 
-class HomeServiceBaseTask(AbstractHomeServiceTask):
+class HomeServiceTask(AbstractHomeServiceTask):
+    NAME_KEY = "objectId"
+
     def __init__(
         self,
         sensors: SensorSuite,
-        env: HomeServiceTHOREnvironment,
+        env: HomeServiceEnvironment,
         max_steps: int,
         discrete_actions: Tuple[str, ...],
         smooth_nav: bool = False,
@@ -86,11 +81,13 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         require_done_action: bool = False,
         task_spec_in_metrics: bool = False,
     ) -> None:
+        """
+        Create a new HomeService task.
+        """
 
         super().__init__(
             env=env, sensors=sensors, task_info=dict(), max_steps=max_steps,
         )
-        self.env: HomeServiceTHOREnvironment = env
         self.discrete_actions = discrete_actions
         self.smooth_nav = smooth_nav
         self.smoothing_factor = smoothing_factor if self.smooth_nav else 1
@@ -99,571 +96,338 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
         self.task_spec_in_metrics = task_spec_in_metrics
 
         self._took_end_action: bool = False
-        # self._took_goto_action: bool = False
-        # self._check_goto_done: bool = False
-        # self._1st_check: bool = False
-        # self._2nd_check: bool = False
-        self._took_subtask_rollback: bool = False
-        self._rollback_count: int = 0
-        self._init_position_change_sensor: bool = False
-
-        self._target_positions: Dict[str, np.ndarray] = {}
-        self._target_visibles: Dict[str, bool] = {}
-        # self._place_position: Optional[np.array] = None
-        # self._place_visible: Optional[bool] = None
-
-        self.task_planner = None
-        self.greedy_expert = None
-        self._subtask_step = 0
-        self._planned_task = None
         self._obs = None
-
+        
+        self.expert = None
         self.actions_taken = []
         self.actions_taken_success = []
-        self.rewards = []
-        self.subtask_info = [self.current_subtask]
         self.agent_locs = [self.env.get_agent_location()]
 
+    # # TODO: implement ProcTHOR Navigator
+    # def create_navigator(self):
+    #     return ShortestPathNavigatorProcTHOR(
+    #         env=self.env,
+    #         grid_size=self.env.grid_size,
+    #         include_move_left_right=all(
+    #             f"move_{k}" in self.action_names() for k in ["left", "right"]
+    #         )
+    #     )
+
+    # # TODO: implement expert
+    # def create_expert(self):
+    #     return HomeServiceExpert(
+    #         task=self,
+    #         shortest_path_navigator=self.env.shortest_path_navigator,
+    #     )
+
+    # # TODO: implement expert
+    # @property
+    # def expert_priority(self):
+    #     return self.expert.object_id_to_priority
+
+    # # TODO: implement expert
+    # def query_expert(self, **kwargs) -> Tuple[Any, bool]:
+    #     if self.expert is None:
+    #         if not hasattr(self.env, "shortest_path_navigator"):
+    #             # TODO: This is a bit hacky
+    #             self.env.shortest_path_navigator = self.create_navigator()
+    #
+    #         self.expert = self.create_expert()
+    #
+    #     action = self.expert.expert_action
+    #     if action is None:
+    #         return 0, False
+    #     else:
+    #         return action, True
+    
     @property
     def action_space(self) -> gym.spaces.Discrete:
         return gym.spaces.Discrete(len(self.action_names()))
 
-    @property
-    def target_positions(self) -> Dict[str, np.ndarray]:
-        return self._target_positions
-
-    @property
-    def target_visibles(self) -> Dict[str, bool]:
-        return self._target_visibles
-
-    @target_positions.setter
-    def target_positions(self, pos_dict: Dict[str, Union[np.ndarray, dict]]):
-        for k, v in pos_dict.items():
-            if isinstance(v, np.ndarray):
-                self._target_positions[k] = v
-            elif isinstance(v, dict):
-                self._target_positions[k] = np.array([v["x"], v["y"], v["z"]], dtype=np.float32)
-    
-    @target_visibles.setter
-    def target_visibles(self, vis_dict: Dict[str, bool]):
-        for k, v in vis_dict.items():
-            self._target_visibles[k] = v
-
-    @property
-    def require_init_position_sensor(self) -> bool:
-        return self._init_position_change_sensor
-
-    @require_init_position_sensor.setter
-    def require_init_position_sensor(self, val: bool):
-        self._init_position_change_sensor = val
-
-    @property
-    def num_subtasks(self) -> int:
-        return len(self.planned_task)
-
-    @property
-    def planned_task(self):
-        if self._planned_task is None:
-            self._planned_task = self.query_planner()
-        return self._planned_task
-
-    @property
-    def current_subtask(self):
-        return (
-            self.planned_task[self._subtask_step] 
-            if self._subtask_step < self.num_subtasks
-            else ("Done", None, None)
-        )
-    
-    def subtask_step(self) -> int:
-        return self._subtask_step
-
-    def rollback_subtask(self):
-        if self._subtask_step > 0:
-            self._subtask_step -= 1
-            self._took_subtask_rollback = True
-            self._rollback_count += 1
-
-    def subtask_succeeded(self):
-        self._subtask_step += 1
-        assert self._subtask_step < self.num_subtasks + 1
-
-    def is_current_subtask_done(self):
-        subtask_action, subtask_target, subtask_place = self.current_subtask
-        
-        if subtask_action == "Done":
-            return True
-
-        elif subtask_action == "Navigate":
-            with include_object_data(self.env.controller):
-                metadata = self.env.last_event.metadata
-                assert subtask_place is None
-                cur_subtask_target = next(
-                    (o for o in metadata["objects"] if o["objectType"] == subtask_target), None
-                )
-                
-                if self.env.scene == self.env.current_task_spec.target_scene:
-                    assert cur_subtask_target is not None
-
-                    if cur_subtask_target["visible"] and cur_subtask_target["distance"] < VISIBILITY_DISTANCE:
-                        # print(f'cur_subtask_target in navigate success')
-                        # print(f'visible: {cur_subtask_target["visible"]} | distance: {cur_subtask_target["distance"]}')
-                        self.subtask_succeeded()
-                        return True
-
-        elif subtask_action == "Pickup":
-            with include_object_data(self.env.controller):
-                metadata = self.env.last_event.metadata
-                assert subtask_place is None
-                if metadata["lastActionSuccess"] and (
-                    metadata["lastAction"] == f"{subtask_action}Object"
-                ) and (
-                    self.env.held_object["objectType"] == subtask_target
-                ):
-                    self.subtask_succeeded()
-                    return True
-
-        elif subtask_action in ["Open", "Close"]:
-            with include_object_data(self.env.controller):
-                metadata = self.env.last_event.metadata
-                assert subtask_place is None
-                if metadata["lastActionSuccess"] and (
-                    metadata["lastAction"] == f"{subtask_action}Object"
-                ):
-                    self.subtask_succeeded()
-                    return True
-
-        elif subtask_action == "Put":
-            with include_object_data(self.env.controller):
-                metadata = self.env.last_event.metadata
-                assert subtask_place is not None
-                cur_subtask_target = next(
-                    (o for o in metadata["objects"] if o["objectType"] == subtask_target), None
-                )
-                cur_subtask_place = next(
-                    (o for o in metadata["objects"] if o["objectType"] == subtask_place), None
-                )
-                if self.env.scene == self.env.current_task_spec.target_scene:
-                    assert cur_subtask_target is not None
-                    assert cur_subtask_place is not None
-
-                    if metadata["lastActionSuccess"] and (
-                        metadata["lastAction"] == f"{subtask_action}Object"
-                    ) and (
-                        self.env.held_object is None
-                    ):
-                        if cur_subtask_place["objectId"] in cur_subtask_target["parentReceptacles"]:
-                            self.subtask_succeeded()
-                            return True
-
-        elif subtask_action == "Goto":
-            # TODO
-            # if current room type detected from sensor is equal to the target room type
-            # return True
-            
-            # ORACLE
-            metadata = self.env.last_event.metadata
-            if (
-                metadata["lastActionSuccess"]
-                and SCENE_TO_SCENE_TYPE[self.env.scene] == subtask_target
-                and self.greedy_expert.check_room_type_done
-                and not self.greedy_expert.require_check_room_type
-            ):
-                self.subtask_succeeded()
-                return True
-
-        elif subtask_action == "Scan":
-            # TODO
-            self.subtask_succeeded()
-            return True
-
-        else:
-            raise NotImplementedError(
-                f"Action {subtask_action} for the subtasks is not implemented"
-            )
-
-        return False
-
     def close(self) -> None:
         try:
-            self.env.step()
+            self.env.stop()
         except Exception as _:
             pass
 
-    def action_names(self, **kwargs) -> Tuple[str, ...]:
+    def metrics(self) -> Dict[str, Any]:
+        if not self.is_done():
+            return {}
 
+        env = self.env
+        ips, gps, cps = env.poses
+
+        metrics = super().metrics()
+        
+        task_info = metrics["task_info"]
+        task_info["scene"] = self.env.scene
+        
+        # TODO: Implement metrics
+
+        return metrics
+
+    def action_names(self, **kwargs) -> Tuple[str, ...]:
         return self.discrete_actions
     
     def render(self, *args, **kwargs) -> Dict[str, np.array]:
-
         obs = self.env.observation
         return {
             "rgb": obs[0], "depth": obs[1],
         }
 
     def reached_terminal_state(self) -> bool:
-
         return (self.require_done_action and self._took_end_action) or (
             (not self.require_done_action)
-            and self.current_subtask[0] == "Done"
         )
 
-    def query_planner(self):
-        return []
-
-    def _judge(self, obs, action, next_obs, action_success, current_subtask, subtask_done) -> float:
+    def _judge(self, obs, action, next_obs, action_success,) -> float:
         """Return the reward from a new (s, a, s')."""
-        action_name = self.action_names()[action]
-        reward = -0.05
-        if not action_success:
-            reward += -0.05
-
-        if subtask_done:
-            reward += 1
-
-        if current_subtask[0] == "Done":
-            if action_name == "done":
-                reward += 10
-            else:
-                # should take "done" when all the task is done
-                reward += -10
-        else:
-            # If "done" action taken when it is not "Done" subtask
-            if action_name == "done":
-                reward += -10
-
-            if current_subtask[0] != "Goto":
-                if action_name.startswith("goto"):
-                    # Wrongly moved to other room type
-                    reward += -10
-        
-        if self._took_subtask_rollback:
-            reward += -1 * self._rollback_count
-            self._took_subtask_rollback = False
-            self._rollback_count = 0
+        # TODO: Implement reward function
+        reward = 0.
 
         return reward
+
+    def find_object_by_type(self, object_type: str, visible: bool = True,):
+        with include_object_data(self.env.controller):
+            metadata = self.env.last_event.metadata
+
+            possible_objects = [
+                o
+                for o in metadata["objects"]
+                if (
+                    (o["objectType"] == object_type)
+                    and (o["visible"] or not visible)
+                )
+            ]
+            
+            possible_objects = sorted(
+                possible_objects, key=lambda po: (po["distance"], po["name"])
+            )
+            
+            return possible_objects
 
     def _step(self, action: int) -> RLStepResult:
         """
         action: is the index of the action from self.action_names()
         """
-        # obs = [self._obs]
         action_name = self.action_names()[action]
 
-        # if action_name.startswith("pickup_"):
-        #     with include_object_data(self.env.controller):
-        #         metadata = self.env.last_event.metadata
-
-        #         if len(metadata["inventoryObjects"]) != 0:
-        #             action_success = False
-        #         else:
-        #             object_type = stringcase.pascalcase(
-        #                 action_name.replace("pickup_", "")
-        #             )
-        #             possible_objects = [
-        #                 o
-        #                 for o in metadata["objects"]
-        #                 if o["visible"] and o["objectType"] == object_type
-        #             ]
-
-        #             possible_objects = sorted(
-        #                 possible_objects, key=lambda po: (po["distance"], po["name"])
-        #             )
-
-        #             object_before = None
-        #             if len(possible_objects) > 0:
-        #                 object_before = possible_objects[0]
-        #                 object_id = object_before["objectId"]
-
-        #             if object_before is not None:
-        #                 self.env.controller.step(
-        #                     "PickupObject",
-        #                     objectId=object_id,
-        #                     **self.env.physics_step_kwargs,
-        #                 )
-        #                 action_success = self.env.last_event.metadata["lastActionSuccess"]
-        #             else:
-        #                 action_success = False
-
-        #             if action_success and self.env.held_object is None:
-        #                 get_logger().warning(
-        #                     f"`PickupObject` was successful in picking up {object_id} but we're not holding"
-        #                     f" any object! Current task spec: \n {self.env.current_task_spec}"
-        #                 )
-        #                 action_success = False
-
-        # elif action_name.startswith("open_by_type"):
-        #     object_type = stringcase.pascalcase(
-        #         action_name.replace("open_by_type_", "")
-        #     )
-        #     with include_object_data(self.env.controller):
-        #         metadata = self.env.last_event.metadata
-        #         pickup_target = self.env.current_task_spec.pickup_target
-        #         place_target = self.env.current_task_spec.place_target
-
-        #         pickup_target_openable_receptacle = None
-        #         if pickup_target["parentReceptacles"] is not None:
-        #             for obj in metadata["objects"]:
-        #                 if (
-        #                     obj["openable"]
-        #                     and obj["objectId"] in pickup_target["parentReceptacles"]
-        #                 ):
-        #                     pickup_target_openable_receptacle = obj
-        #                     break
-
-        #         object_before = None
-        #         pickup_target_openable_receptacle_name = (
-        #             pickup_target_openable_receptacle["name"]
-        #             if pickup_target_openable_receptacle is not None and "name" in pickup_target_openable_receptacle
-        #             else None
-        #         )
-
-        #         for obj in metadata["objects"]:
-        #             if (
-        #                 obj["visible"]
-        #                 and obj["openable"]
-        #                 and obj["objectType"] == object_type
-        #                 and (
-        #                     obj["name"] == place_target["name"]
-        #                     or obj["name"] == pickup_target_openable_receptacle_name
-        #                 )
-        #             ):
-        #                 object_before = obj
-        #                 break
-
-        #         if object_before is not None:
-        #             if object_before["openness"] > 0.0:
-        #                 self.env.controller.step(
-        #                     "CloseObject",
-        #                     objectId=object_before["objectId"],
-        #                     **self.env.physics_step_kwargs,
-        #                 )
-                    
-        #             self.env.controller.step(
-        #                 "OpenObject",
-        #                 objectId=object_before["objectId"],
-        #                 openness=1.0,
-        #                 **self.env.physics_step_kwargs,
-        #             )
-        #             action_success = self.env.last_event.metadata["lastActionSuccess"]
-        #         else:
-        #             action_success = False
-
-        # elif action_name.startswith("close_by_type"):
-        #     object_type = stringcase.pascalcase(
-        #         action_name.replace("close_by_type_", "")
-        #     )
-        #     with include_object_data(self.env.controller):
-        #         metadata = self.env.last_event.metadata
-        #         pickup_target = self.env.current_task_spec.pickup_target
-        #         place_target = self.env.current_task_spec.place_target
-
-        #         pickup_target_openable_receptacle = None
-        #         if pickup_target["parentReceptacles"] is not None:
-        #             for obj in metadata["objects"]:
-        #                 if (
-        #                     obj["openable"]
-        #                     and obj["objectId"] in pickup_target["parentReceptacles"]
-        #                 ):
-        #                     pickup_target_openable_receptacle = obj
-        #                     break
-                        
-        #         object_before = None
-        #         pickup_target_openable_receptacle_name = (
-        #             pickup_target_openable_receptacle["name"]
-        #             if pickup_target_openable_receptacle is not None and "name" in pickup_target_openable_receptacle
-        #             else None
-        #         )
-
-        #         for obj in metadata["objects"]:
-        #             if (
-        #                 obj["visible"]
-        #                 and obj["openable"]
-        #                 and obj["objectType"] == object_type
-        #                 and (
-        #                     obj["name"] == place_target["name"]
-        #                     or obj["name"] == pickup_target_openable_receptacle_name
-        #                 )
-        #             ):
-        #                 object_before = obj
-        #                 break
-
-        #         if object_before is not None:
-        #             if object_before["openness"] > 0.0:
-        #                 self.env.controller.step(
-        #                     "CloseObject",
-        #                     objectId=object_before["objectId"],
-        #                     **self.env.physics_step_kwargs,
-        #                 )
-                    
-        #             action_success = self.env.last_event.metadata["lastActionSuccess"]
-        #         else:
-        #             action_success = False
-
-        # elif action_name.startswith("put_by_type"):
-        #     object_type = stringcase.pascalcase(
-        #         action_name.replace("put_by_type_", "")
-        #     )
-        #     with include_object_data(self.env.controller):
-        #         metadata = self.env.last_event.metadata
-        #         pickup_object = self.env.current_task_spec.pickup_object
-        #         place_receptacle = self.env.current_task_spec.place_receptacle
-
-        #         if len(metadata["inventoryObjects"]) == 0:
-        #             action_success = False
-        #         else:
-        #             object_before = None
-        #             for obj in metadata["objects"]:
-        #                 if (
-        #                     obj["visible"]
-        #                     and obj["receptacle"]
-        #                     and obj["objectType"] == place_receptacle
-        #                     # and obj["name"] == place_target["name"]
-        #                 ):
-        #                     object_before = obj
-        #                     break
-                    
-        #             if object_before is not None:
-        #                 self.env.controller.step(
-        #                     "PutObject",
-        #                     objectId=object_before["objectId"],
-        #                     **self.env.physics_step_kwargs,
-        #                 )
-        #                 action_success = self.env.last_event.metadata["lastActionSuccess"]
-        #             else:
-        #                 action_success = False
-
-        if action_name == "pickup":
-            pickup_obj_type = self.env.current_task_spec.pickup_object
+        if action_name.startswith("pickup"):
             with include_object_data(self.env.controller):
                 md = self.env.last_event.metadata
 
                 if len(md["inventoryObjects"]) != 0:
                     action_success = False
                 else:
-                    pickup_obj = next(
-                        (
-                            obj for obj in md['objects']
-                            if obj['objectType'] == pickup_obj_type
-                        ), None
+                    object_type = stringcase.pascalcase(
+                        action_name.replace("pickup_", "")
                     )
-                    if pickup_obj is None:
-                        action_success = False
-                    else:
+                    possible_objs = self.find_object_by_type(object_type)
+                    obj_before = None
+                    if len(possible_objs) > 0:
+                        obj_before = possible_objs[0]
+                        obj_id = obj_before["objectId"]
+
+                    if obj_before is not None:
                         self.env.controller.step(
                             "PickupObject",
-                            objectId=pickup_obj['objectId'],
+                            objecId=obj_id,
                             **self.env.physics_step_kwargs,
                         )
                         action_success = self.env.last_event.metadata["lastActionSuccess"]
+                    else:
+                        action_success = False
                     
                     if action_success and self.env.held_object is None:
                         get_logger().warning(
-                            f"`PickupObject` was successful in picking up {pickup_obj} but we're not holding"
+                            f"`PickupObject` was successful in picking up {obj_id} but we're not holding"
                             f" any object! Current task spec: \n {self.env.current_task_spec}"
                         )
                         action_success = False
 
-        elif action_name == "put":
-            pickup_obj_type = self.env.current_task_spec.pickup_object
-            place_recep_type = self.env.current_task_spec.place_receptacle
+        elif action_name.startswith("open_by_type"):
+            object_type = stringcase.pascalcase(
+                action_name.replace("open_by_type_", "")
+            )
             with include_object_data(self.env.controller):
-                md = self.env.last_event.metadata
 
-                if len(md["inventoryObjects"]) == 0:
-                    action_success = False
-                else:
-                    place_recep = next(
-                        (
-                            obj for obj in md['objects']
-                            if (
-                                obj['visible']
-                                and obj['receptacle']
-                                and obj['objectType'] == place_recep_type
-                            )
-                        ), None
-                    )
-                    if place_recep is None:
-                        action_success = False
-                    else:
+                possible_objs = self.find_object_by_type(object_type)
+
+                obj_before = None
+                if len(possible_objs) > 0:
+                    obj_before = possible_objs[0]
+                    obj_id = obj_before["objectId"]
+
+                if obj_before is not None:
+                    action_success = True
+                    if obj_before["openness"] < 1.0:
                         self.env.controller.step(
-                            "PutObject",
-                            objectId=place_recep["objectId"],
+                            "OpenObject",
+                            objecId=obj_id,
+                            openness=1.0,
                             **self.env.physics_step_kwargs,
                         )
                         action_success = self.env.last_event.metadata["lastActionSuccess"]
+                else:
+                    action_success = False
 
-        elif action_name == "open":
-            pass
+        elif action_name.startswith("close_by_type"):
+            object_type = stringcase.pascalcase(
+                action_name.replace("close_by_type_", "")
+            )
+            with include_object_data(self.env.controller):
 
-        elif action_name == "close":
-            pass
+                possible_objs = self.find_object_by_type(object_type, openable=True)
 
-        elif action_name.startswith(("move", "rotate")):
-            # opposites = {
-            #     "ahead": "back",
-            #     "back": "ahead",
-            #     "right": "left",
-            #     "left": "right",
-            # }
-            # direction = action_name.split("_")[-1]
-            # opposite_direction = opposites[direction]
-            # for i in range(self.smoothing_factor):
-            action_success = getattr(self.env, action_name)()
-                # obs.append(self.get_observations())
+                obj_before = None
+                if len(possible_objs) > 0:
+                    obj_before = possible_objs[0]
+                    obj_id = obj_before["objectId"]
 
-                # if not action_success:
-                #     # obs.pop()
-                #     for j in range(i):
-                #         getattr(self.env, "_".join([action_name.split("_")[0], opposite_direction]))()
-                #         # obs.pop()
-                #     break
-        
-        elif action_name.startswith("look"):
-            # opposites = {
-            #     "up": "down",
-            #     "down": "up",
-            # }
-            # direction = action_name.split("_")[-1]
-            # opposite_direction = opposites[direction]
-            # for i in range(self.smoothing_factor):
-            action_success = getattr(self.env, action_name)(1.0 / self.smoothing_factor)
-                # obs.append(self.get_observations())
+                if obj_before is not None:
+                    action_success = True
+                    if obj_before["openness"] > 0.0:
+                        self.env.controller.step(
+                            "CloseObject",
+                            objecId=obj_id,
+                            openness=1.0,
+                            **self.env.physics_step_kwargs,
+                        )
+                        action_success = self.env.last_event.metadata["lastActionSuccess"]
+                else:
+                    action_success = False
 
-                # if not action_success:
-                #     # obs.pop()
-                #     for j in range(i):
-                #         getattr(self.env, "_".join([action_name.split("_")[0], opposite_direction]))(1.0 / self.smoothing_factor)
-                #         # obs.pop()
-                #     break
+        elif action_name.startswith("put"):
+            # USE This instead of "drop_held_object_with_snap"
+            DEC = 2
 
-        elif action_name.startswith(("stand", "crouch")):
+            with include_object_data(self.env.controller):
+                metadata = self.env.last_event.metadata
+
+                if len(metadata["inventoryObjects"]) == 0:
+                    # The agent is not holding an object.
+                    action_success = False
+                else:
+                    # When dropping up an object, make it breakable.
+                    self.env.controller.step(
+                        "MakeObjectBreakable", objectId=self.held_object["objectId"]
+                    )
+
+                    object_type = stringcase.pascalcase(
+                        action_name.replace("put_", "")
+                    )
+                    # In case that the object_type is target receptacle
+                    if object_type in self.env.current_task_spec.place_receptacle:
+                        object_type = self.env.current_task_spec.place_receptacle
+
+                        # Trying to put object by snapping
+                        # Determine whether the agent is located valid position
+                        agent = metadata["agent"]
+                        held_obj = self.env.held_object
+                        goal_pose = self.env.object_name_to_target_pose[held_obj["name"]]
+                        goal_pos = goal_pose["position"]
+                        goal_rot = goal_pose["rotation"]
+                        good_positions_to_put_obj = self.env._interactable_positions_cache.get(
+                            scene_name=metadata["sceneName"],
+                            obj={**held_obj, **{"position": goal_pos, "rotation": goal_rot},},
+                            controller=self.env.controller,
+                            force_cache_refresh=self.env.force_cache_reset,
+                        )
+
+                        def position_to_tuple(position: Dict[str, float]):
+                            return tuple(round(position[k], DEC) for k in ["x", "y", "z"])
+
+                        agent_xyz = position_to_tuple(agent["position"])
+                        agent_rot = (round(agent["rotation"]["y"] / self.env.rotate_step_degrees) * self.env.rotate_step_degrees) % 360
+                        agent_standing = int(agent["isStanding"])
+                        agent_horizon = round(agent["cameraHorizon"])
+
+                        for valid_agent_pos in good_positions_to_put_obj:
+                            # Checks if the agent is close enough to the target
+                            # for the object to be snapped to the target location.
+                            valid_xyz = position_to_tuple(valid_agent_pos)
+                            valid_rot = (round(valid_agent_pos["rotation"] / self.env.rotate_step_degrees) * self.env.rotate_step_degrees) % 360
+                            valid_standing = int(valid_agent_pos["standing"])
+                            valid_horizon = round(valid_agent_pos["horizon"])
+                            if (
+                                valid_xyz == agent_xyz  # Position
+                                and valid_rot == agent_rot  # Rotation
+                                and valid_standing == agent_standing  # Standing
+                                and round(valid_horizon) == agent_horizon  # Horizon
+                            ):
+                                # Try a few locations near the target for robustness' sake
+                                positions = [
+                                    {
+                                        "x": goal_pos["x"] + 0.001 * xoff,
+                                        "y": goal_pos["y"] + 0.001 * yoff,
+                                        "z": goal_pos["z"] + 0.001 * zoff,
+                                    }
+                                    for xoff in [0, -1, 1]
+                                    for zoff in [0, -1, 1]
+                                    for yoff in [0, 1, 2]
+                                ]
+                                self.env.controller.step(
+                                    action="TeleportObject",
+                                    objectId=held_obj["objectId"],
+                                    rotation=goal_rot,
+                                    positions=positions,
+                                    forceKinematic=True,
+                                    allowTeleportOutOfHand=True,
+                                    makeUnbreakable=True,
+                                )
+                                break
+                        
+                        if self.env.held_object is None:
+                            put_obj = next(
+                                get_pose_info(o)
+                                for o in self.env.last_event.metadata["objects"]
+                                if o["name"] == goal_pose["name"]
+                            )
+                            if len(put_obj["parentReceptacles"]) > 0:
+                                recep = None
+                                for recep_id in put_obj["parentReceptacles"]:
+                                    recep = next(
+                                        (
+                                            o
+                                            for o in self.env.last_event.metadata["objects"]
+                                            if o["objectType"] == object_type and o["objectId"] == recep_id
+                                        ), None
+                                    )
+                                    if recep is not None:
+                                        action_success = True
+                                        break
+                                
+                                if recep is None:
+                                    action_success = False
+                            else:
+                                action_success = False
+                    
+                    assert self.env.held_object is not None
+                    possible_objs = self.find_object_by_type(object_type)
+                    
+                    obj_before = None
+                    if len(possible_objs) > 0:
+                        obj_before = possible_objs[0]
+                        obj_id = obj_before["objectId"]
+
+                    if obj_before is not None:
+                        self.env.controller.step(
+                            "PutObject",
+                            objectId=obj_id,
+                            **self.env.physics_step_kwargs,
+                        )
+                        action_success = self.env.last_event.metadata["lastActionSuccess"]
+                    else:
+                        action_success = False
+
+        elif action_name.startswith(("move", "rotate", "look", "stand", "crouch")):
             action_success = getattr(self.env, action_name)()
         elif action_name == "done":
             self._took_end_action = True
-            # action_success = getattr(self.env, action_name)()
             action_success = True
         elif action_name == "pass":
             event = self.env.controller.step("Pass")
             action_success = event.metadata["lastActionSuccess"]
-        elif action_name.startswith("goto"):
-            scene_type = "_".join(action_name.split("_")[1:])
-            assert scene_type in ("kitchen", "living_room", "bedroom", "bathroom")
-            if SCENE_TO_SCENE_TYPE[self.env.scene] == scene_type:
-                action_success = False
-            else:
-                self.env.reset(
-                    task_spec=self.env.current_task_spec,
-                    force_axis_aligned_start=self.force_axis_aligned_start,
-                    scene_type=stringcase.pascalcase(scene_type)
-                )
-                action_success = self.env.last_event.metadata['lastActionSuccess']
-                if action_success:
-                    self.require_init_position_sensor = True
-                    if self.greedy_expert is not None:
-                        self.greedy_expert.require_check_room_type = True
-            #     self._took_goto_action = True
         else:
             raise RuntimeError(
                 f"Action '{action_name}' is not in the action space {HomeServiceActionSpace}"
@@ -671,27 +435,20 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
 
         self.actions_taken.append(action_name)
         self.actions_taken_success.append(action_success)
-        self.subtask_info.append(self.current_subtask)
         if self.task_spec_in_metrics:
             self.agent_locs.append(self.env.get_agent_location())
 
-        # print(f'step {self.num_steps_taken()} | current subtask {self.current_subtask} | action_taken {action_name} | action taken success {action_success}', end=" | ")
-        current_subtask = self.current_subtask
-        subtask_done = self.is_current_subtask_done()
-        # print(f'subtask_done {subtask_done}')
-        # self._obs = self.get_observations()
         reward = self._judge(
-            obs=None,
-            action=action,
-            next_obs=None,
+            obs=self._obs,      # s0
+            action=action,      # a0
+            next_obs=self.get_observations(),      # s1
             action_success=action_success,
-            current_subtask=current_subtask,
-            subtask_done=subtask_done
         )
-        self.rewards.append(reward)
+        # self.rewards.append(reward)
 
+        # self._obs is updated
         return RLStepResult(
-            observation=None,
+            observation=self._obs,
             reward=reward,
             done=self.is_done(),
             info={"action_name": action_name, "action_success": action_success},
@@ -703,216 +460,85 @@ class HomeServiceBaseTask(AbstractHomeServiceTask):
 
     def step(self, action: int) -> RLStepResult:
         step_result = super().step(action=action)
-        if self.greedy_expert is not None:
-            self.greedy_expert.update(
+        if self.expert is not None:
+            self.expert.update(
                 action_taken=action, action_success=step_result.info["action_success"]
             )
         step_result = RLStepResult(
-            observation=self.get_observations(),
+            observation=step_result.observation,
             reward=step_result.reward,
             done=step_result.done,
             info=step_result.info,
         )
         return step_result
-
-
-class HomeServiceSimplePickAndPlaceTask(HomeServiceBaseTask):
-    def __init__(
-        self,
-        **init_kwargs,
-    ):
-        super().__init__(**init_kwargs)
-        self.greedy_expert: Optional[SubTaskExpert] = None
-
-    def query_planner(self, **kwargs) -> Sequence[Tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]]:
-        """
-        Query task planning result from task planner
-        self.task_planner = TaskPlanner(
-            task=self,
-        )
-        """
-        target_object = self.env.current_task_spec.pickup_object
-        target_place = self.env.current_task_spec.place_receptacle
-        start_scene = self.env.current_task_spec.start_scene
-        start_scene_type = SCENE_TO_SCENE_TYPE[start_scene]
-        target_scene = self.env.current_task_spec.target_scene
-        target_scene_type = SCENE_TO_SCENE_TYPE[target_scene]
-
-        task_plan = []
-        task_plan.append(("Goto", target_scene_type, None))
-        task_plan.append(("Scan", None, None))
-        # self.task_planner = sEDM_model()
-        if self.task_planner is not None:
-            planner_result = self.task_planner.inference(target_object=target_object, target_place=target_place)
-            for i in range(len(planner_result)):
-                if planner_result[i][-1] == "hanger":
-                    planner_result[i] = (planner_result[i][0], planner_result[i][1], "ToiletPaperHanger")
-                if planner_result[i][1] == "hanger":
-                    planner_result[i] = (planner_result[i][0], "ToiletPaperHanger", planner_result[i][2])
-            
-            if target_place == "User":
-                task_plan.extend(planner_result[:2])
-                task_plan.append(("Goto", start_scene_type, None))
-            else:
-                task_plan.extend(planner_result)
-        
-        else:
-            task_plan = []
-            
-            task_plan.append(("Goto", target_scene_type, None))
-            task_plan.append(("Scan", None, None))
-            task_plan.append(("Navigate", target_object, None))    
-            task_plan.append(("Pickup", target_object, None))
-            if target_place != "User":
-                task_plan.append(("Navigate", target_place, None))
-                task_plan.append(("Put", target_object, target_place))
-            else:
-                task_plan.append(("Goto", start_scene_type, None))
-        
-        return task_plan
-        
-    # def query_expert(self, **kwargs) -> Tuple[Any, bool]:
-    #     if self.greedy_expert is None:
-    #         if not hasattr(self.env, "shortest_path_navigator"):
-    #             self.env.shortest_path_navigator = ShortestPathNavigatorTHOR(
-    #                 controller = self.env.controller,
-    #                 grid_size=STEP_SIZE,
-    #                 include_move_left_right=all(
-    #                     f"move_{k}" in self.action_names() for k in ["left", "right"]
-    #                 ),
-    #             )
-            
-    #         # self.greedy_expert = GreedySimplePickAndPlaceExpert(
-    #         #     task=self,
-    #         #     shortest_path_navigator=self.env.shortest_path_navigator,
-    #         # )
-    #         self.greedy_expert = SubTaskExpert(
-    #             task=self,
-    #             shortest_path_navigator=self.env.shortest_path_navigator,
-    #         )
-            
-    #     action = self.greedy_expert.expert_action
-    #     if action is None:
-    #         return 0, False
-    #     else:
-    #         return action, True
-
-    def metrics(self) -> Dict[str, Any]:
-        if not self.is_done():
-            return {}
-        
-        env = self.env
-        pickup_object = env.current_task_spec.pickup_object
-        start_receptacle = env.current_task_spec.start_receptacle
-        place_receptacle = env.current_task_spec.place_receptacle
-
-        target_object = next(
-            (
-                obj
-                for obj in env.last_event.metadata["objects"]
-                if obj["objectType"] == pickup_object
-            ), None
-        )
-        # assert target_object is not None
-
-        if place_receptacle != "User":
-            possible_place_objects = [
-                obj for obj in env.last_event.metadata["objects"]
-                if obj["objectType"] == place_receptacle
-            ]
-            # assert len(possible_place_objects) > 0
-
-        # receptacle = None
-        # if target_object["parentReceptacles"] is not None:
-        #     receptacle = next(
-        #         (
-        #             o for o in possible_place_objects
-        #             if o['objectId'] in target_object["parentReceptacles"]
-        #         ), None
-        #     )
-        
-        metrics = {
-            **super().metrics(),
-            **{
-                "success": float(True if self.current_subtask[0] == "Done" else False),
-                "subtask_success": float(self._subtask_step / self.num_subtasks)
-            }
-        }
-
-        task_info = metrics["task_info"]
-        task_info["scene"] = env.scene
-        task_info["index"] = env.current_task_spec.metrics.get("index")
-        task_info["stage"] = env.current_task_spec.stage
-        del metrics["task_info"]
-
-        if self.task_spec_in_metrics:
-            task_info["task_spec"] = {**env.current_task_spec.__dict__}
-
-        task_info["actions_taken"] = self.actions_taken
-        task_info["actions_taken_success"] = self.actions_taken_success
-        task_info["subtask_info"] = self.subtask_info
-        task_info["unique_id"] = env.current_task_spec.unique_id if not env.current_task_spec.runtime_sample else None
-
-        metrics = {
-            "task_info": task_info,
-            **metrics,
-        }
-        # print(f'subtask_info: {self.subtask_info}')
-        # print(f'unique_id: {task_info["unique_id"]}')
-        # print(f'action_taken: {self.actions_taken}')
-        # print(f'actions_taken_success: {self.actions_taken_success}')
-        # print(f'rewards: {self.rewards}')
-
-        return metrics
-
     
+    def pickupable_objects(self, visible_only: bool = True):
+        with include_object_data(self.env.controller):
+            return [
+                o
+                for o in self.env.last_event.metadata["objects"]
+                if ((o["visible"] or not visible_only) and o["pickupable"])
+            ]
+
+    def openable_not_pickupable_objects(self, visible_only: bool = True):
+        with include_object_data(self.env.controller):
+            return [
+                o
+                for o in self.env.last_event.metadata["objects"]
+                if (
+                    (o["visible"] or not visible_only)
+                    and (o["openable"] and not o["pickupable"])
+                )
+            ]
+
+    def receptacle_not_pickupable_objects(self, visible_only: bool = True):
+        with include_object_data(self.env.controller):
+            return [
+                o
+                for o in self.env.last_event.metadata["objects"]
+                if (
+                    (o["visible"] or not visible_only)
+                    and (o["receptacle"] and not o["pickupable"])
+                )
+            ]
+
+    def pickupable_or_openable_objects(self, visible_only: bool = True):
+        with include_object_data(self.env.controller):
+            return [
+                o
+                for o in self.env.last_event.metadata["objects"]
+                if (
+                    (o["visible"] or not visible_only)
+                    and (o["pickupable"] or (o["openable"] and not o["pickupable"]))
+                )
+            ]
+
+
 class HomeServiceTaskSpecIterable:
 
     def __init__(
         self,
-        # scenes_to_task_spec_dicts: Dict[str, List[Dict]],
-        task_keys_to_task_spec_dicts: Dict[str, List[Dict]],
+        tasks_to_task_spec_dicts: Dict[str, List[Dict]],
         seed: int,
         epochs: Union[int, float],
         shuffle: bool = True,
-        task_type: HomeServiceTaskType = HomeServiceTaskType.SIMPLE_PICK_AND_PLACE,
-        # scenes_to_task_dicts: Dict[str, List[Dict]] = None,
     ):
         assert epochs >= 1
 
-        self.task_keys_to_task_spec_dicts = {
-            k: [*v] for k, v in task_keys_to_task_spec_dicts.items()
+        self.tasks_to_task_spec_dicts = {
+            k: [*v] for k, v in tasks_to_task_spec_dicts.items()
         }
-        # assert len(self.task_keys_to_task_spec_dicts) != 0 and all(
-        #     len(self.task_keys_to_task_spec_dicts[task_key]) != 0
-        #     for task_key in self.task_keys_to_task_spec_dicts
-        # )
-        assert len(self.task_keys_to_task_spec_dicts) != 0
-        # self.scenes_to_task_spec_dicts = {
-        #     k: [*v] for k, v in scenes_to_task_spec_dicts.items()
-        # }
-        # assert len(self.scenes_to_task_spec_dicts) != 0 and all(
-        #     len(self.scenes_to_task_spec_dicts[scene]) != 0
-        #     for scene in self.scenes_to_task_spec_dicts
-        # )
-        # self.scenes_to_task_dicts = None
-        # if scenes_to_task_dicts is not None:
-        #     self.scenes_to_task_dicts = {
-        #         k: [*v] for k, v in scenes_to_task_dicts.items()
-        #     }        
+        assert len(self.tasks_to_task_spec_dicts) != 0
+
         self._seed = seed
         self.random = random.Random(self.seed)
         self.start_epochs = epochs
         self.remaining_epochs = epochs
         self.shuffle = shuffle
-        self.task_type = task_type
 
-        # self.remaining_scenes: List[str] = []
-        self.remaining_task_keys: List[str] = []
-        # self.task_spec_dicts_for_current_scene: List[Dict[str, Any]] = []
-        self.task_spec_dicts_for_current_task_key: List[Dict[str, Any]] = []
-        # self.current_scene: Optional[str] = None
-        self.current_task_key: Optional[str] = None
+        self.remaining_tasks: List[str] = []
+        self.task_spec_dicts_for_current_task: List[Dict[str, Any]] = []
+        self.current_task: Optional[str] = None
 
         self.reset()
 
@@ -931,59 +557,61 @@ class HomeServiceTaskSpecIterable:
             return float("inf")
 
         return (
-            len(self.task_spec_dicts_for_current_task_key)
+            len(self.task_spec_dicts_for_current_task)
             + sum(
-                len(self.task_keys_to_task_spec_dicts[task_key])
-                for task_key in self.remaining_task_keys
+                len(self.tasks_to_task_spec_dicts[task])
+                for task in self.remaining_tasks
             )
             + self.remaining_epochs
-            * (sum(len(v) for v in self.task_keys_to_task_spec_dicts.values()))
+            * (sum(len(v) for v in self.tasks_to_task_spec_dicts.values()))
         )
     
     @property
     def total_unique(self):
-        return sum(len(v) for v in self.task_keys_to_task_spec_dicts.values())
+        return sum(len(v) for v in self.tasks_to_task_spec_dicts.values())
 
     def reset(self):
         self.random.seed(self.seed)
         self.remaining_epochs = self.start_epochs
-        self.remaining_task_keys.clear()
-        self.task_spec_dicts_for_current_task_key.clear()
-        self.current_task_key = None
+        self.remaining_tasks.clear()
+        self.task_spec_dicts_for_current_task.clear()
+        self.current_task = None
 
     def refresh_remaining_scenes(self):
         if self.remaining_epochs <= 0:
             raise StopIteration
         self.remaining_epochs -= 1
 
-        self.remaining_task_keys = list(sorted(self.task_keys_to_task_spec_dicts.keys()))
+        self.remaining_tasks = list(sorted(self.tasks_to_task_spec_dicts.keys()))
         if self.shuffle:
-            self.random.shuffle(self.remaining_task_keys)
-        return self.remaining_task_keys
+            self.random.shuffle(self.remaining_tasks)
+        return self.remaining_tasks
 
     def __next__(self) -> HomeServiceTaskSpec:
-        while len(self.task_spec_dicts_for_current_task_key) == 0:
-            if len(self.remaining_task_keys) == 0:
+        while len(self.task_spec_dicts_for_current_task) == 0:
+            if len(self.remaining_tasks) == 0:
                 self.refresh_remaining_scenes()
-            self.current_task_key = self.remaining_task_keys.pop()
+            self.current_task = self.remaining_tasks.pop()
 
-            self.task_spec_dicts_for_current_task_key = [
-                *self.task_keys_to_task_spec_dicts[self.current_task_key]
+            self.task_spec_dicts_for_current_task = [
+                *self.tasks_to_task_spec_dicts[self.current_task]
             ]
             if self.shuffle:
-                self.random.shuffle(self.task_spec_dicts_for_current_task_key)
+                self.random.shuffle(self.task_spec_dicts_for_current_task)
 
-        new_task_spec_dict = self.task_spec_dicts_for_current_task_key.pop()
+        new_task_spec_dict = self.preprocess_spec_dict(
+            self.task_spec_dicts_for_current_task.pop()
+        )
         
-        if "task_key" not in new_task_spec_dict:
-            new_task_spec_dict["task_key"] = self.current_task_key
+        if "task" not in new_task_spec_dict:
+            new_task_spec_dict["task"] = self.current_task
         else:
-            assert self.current_task_key == new_task_spec_dict["task_key"]
+            assert self.current_task == new_task_spec_dict["task"]
         
-        if self.task_type == HomeServiceTaskType.SIMPLE_PICK_AND_PLACE:
-            return HomeServiceSimpleTaskOrderTaskSpec(**new_task_spec_dict)
-        else:
-            return HomeServiceTaskSpec(**new_task_spec_dict)
+        return HomeServiceTaskSpec(**new_task_spec_dict)
+
+    def preprocess_spec_dict(self, spec_dict):
+        return compress_pickle.loads(spec_dict, compression="gzip")
 
 
 class HomeServiceTaskSampler(TaskSampler):
@@ -991,8 +619,7 @@ class HomeServiceTaskSampler(TaskSampler):
     def __init__(
         self,
         stage: str,
-        # scenes_to_task_spec_dicts: Dict[str, List[Dict[str, Any]]],
-        task_keys_to_task_spec_dicts: Dict[str, List[Dict[str, Any]]],
+        tasks_to_task_spec_dicts: Dict[str, List[Dict[str, Any]]],
         home_service_env_kwargs: Optional[Dict[str, Any]],
         sensors: SensorSuite,
         max_steps: int,
@@ -1000,8 +627,6 @@ class HomeServiceTaskSampler(TaskSampler):
         smooth_nav: bool,
         require_done_action: bool,
         force_axis_aligned_start: bool,
-        task_type: HomeServiceTaskType = HomeServiceTaskType.SIMPLE_PICK_AND_PLACE,
-        # scenes_to_task_dicts: Optional[Dict[str, List[Dict[str,Any]]]] = None,
         epochs: Union[int, float, str] = "default",
         smoothing_factor: int = 1,
         seed: Optional[int] = None,
@@ -1013,12 +638,7 @@ class HomeServiceTaskSampler(TaskSampler):
         self.main_seed = seed if seed is not None else random.randint(0, 2 * 30 - 1)
 
         self.task_spec_in_metrics = task_spec_in_metrics
-
-        # self.scenes_to_task_spec_dicts = copy.deepcopy(scenes_to_task_spec_dicts)
-        self.task_keys_to_task_spec_dicts = copy.deepcopy(task_keys_to_task_spec_dicts)
-        # self.scenes_to_task_dicts = None
-        # if scenes_to_task_dicts is not None:
-        #     self.scenes_to_task_dicts = copy.deepcopy(scenes_to_task_dicts)
+        self.tasks_to_task_spec_dicts = copy.deepcopy(tasks_to_task_spec_dicts)
 
         if isinstance(epochs, str):
             if epochs.lower().strip() != "default":
@@ -1026,17 +646,15 @@ class HomeServiceTaskSampler(TaskSampler):
             epochs = float("inf") if stage == "train" else 1
 
         self.task_spec_iterator = HomeServiceTaskSpecIterable(
-            task_keys_to_task_spec_dicts=self.task_keys_to_task_spec_dicts,
+            tasks_to_task_spec_dicts=self.tasks_to_task_spec_dicts,
             seed=self.main_seed,
             epochs=epochs,
             shuffle=epochs == float("inf"),
-            task_type=task_type,
-            # scenes_to_task_dicts=self.scenes_to_task_dicts,
         )
         
-        self.env = HomeServiceTHOREnvironment(**home_service_env_kwargs)
+        self.env = HomeServiceEnvironment(**home_service_env_kwargs)
 
-        self.task_keys = list(self.task_keys_to_task_spec_dicts.keys())
+        self.task_keys = list(self.tasks_to_task_spec_dicts.keys())
 
         self.max_steps = max_steps
         self.discrete_actions = discrete_actions
@@ -1044,96 +662,13 @@ class HomeServiceTaskSampler(TaskSampler):
         self.smoothing_factor = smoothing_factor
         self.require_done_action = require_done_action
         self.force_axis_aligned_start = force_axis_aligned_start
-        self.task_type = task_type
 
-        self._last_sampled_task: Optional[HomeServiceBaseTask] = None
-
-    # FOR REARRANGE DATA
-    # @classmethod
-    # def from_fixed_dataset(
-    #     cls,
-    #     stage: str,
-    #     task_type: HomeServiceTaskType,
-    #     allowed_scenes: Optional[Sequence[str]] = None,
-    #     scene_to_allowed_inds: Optional[Dict[str, Sequence[int]]] = None,
-    #     randomize_start_rotation: bool = False,
-    #     **init_kwargs,
-    # ):
-    #     scenes_to_task_spec_dicts = cls._filter_scenes_to_task_spec_dicts(
-    #         scenes_to_task_spec_dicts=cls.load_rearrange_data_from_path(
-    #             stage=stage, base_dir=STARTER_REARRANGE_DATA_DIR
-    #         ),
-    #         allowed_scenes=allowed_scenes,
-    #         scene_to_allowed_inds=scene_to_allowed_inds,
-    #     )
-    #     if randomize_start_rotation:
-    #         random_gen = random.Random(1)
-    #         for scene in sorted(scenes_to_task_spec_dicts.keys()):
-    #             for task_spec_dict in scenes_to_task_spec_dicts[scene]:
-    #                 task_spec_dict["agent_rotation"] = 360.0 * random_gen.random()
-
-    #     return cls(
-    #         stage=stage,
-    #         task_type=task_type,
-    #         scenes_to_task_spec_dicts=scenes_to_task_spec_dicts,
-    #         **init_kwargs
-    #     )
-
-    # FOR REARRANGE DATA
-    # @classmethod
-    # def _filter_scenes_to_task_spec_dicts(
-    #     cls,
-    #     scenes_to_task_spec_dicts: Dict[str, List[Dict[str, Any]]],
-    #     allowed_scenes: Optional[Sequence[str]],
-    #     scene_to_allowed_inds: Optional[Dict[str, Sequence[int]]],
-    # ) -> Dict[str, List[Dict[str, Any]]]:
-    #     if allowed_scenes is not None:
-    #         scenes_to_task_spec_dicts = {
-    #             scene: scenes_to_task_spec_dicts[scene] for scene in allowed_scenes
-    #         }
-
-    #     if scene_to_allowed_inds is not None:
-    #         scenes_to_task_spec_dicts = {
-    #             scene: [
-    #                 scenes_to_task_spec_dicts[scene][ind]
-    #                 for ind in sorted(scene_to_allowed_inds[scene])
-    #             ]
-    #             for scene in scene_to_allowed_inds
-    #             if scene in scenes_to_task_spec_dicts
-    #         }
-    #     return scenes_to_task_spec_dicts
-
-    # FOR REARRANGE DATA
-    # @classmethod
-    # def load_rearrange_data_from_path(
-    #     cls, stage: str, base_dir: Optional[str] = None,
-    # ) -> Dict[str, List[Dict[str, Any]]]:
-    #     stage = stage.lower()
-
-    #     if stage == "valid":
-    #         stage = "val"
-
-    #     data_path = os.path.abspath(os.path.join(base_dir, f"{stage}.pkl.gz"))
-    #     if not os.path.exists(data_path):
-    #         raise RuntimeError(f"No data at path {data_path}")
-
-    #     data = compress_pickle.load(path=data_path)
-    #     for scene in data:
-    #         for ind, task_spec_dict in enumerate(data[scene]):
-    #             task_spec_dict["scene"] = scene
-
-    #             if "index" not in task_spec_dict:
-    #                 task_spec_dict["index"] = ind
-
-    #             if "stage" not in task_spec_dict:
-    #                 task_spec_dict["stage"] = stage
-    #     return data
+        self._last_sampled_task: Optional[HomeServiceTask] = None
 
     @classmethod
     def from_fixed_simple_pick_and_place_data(
         cls,
         stage: str,
-        task_type: HomeServiceTaskType,
         allowed_task_keys: Optional[Sequence[str]] = None,
         allowed_pickup_objs: Optional[Sequence[str]] = None,
         allowed_start_receps: Optional[Sequence[str]] = None,
@@ -1142,8 +677,8 @@ class HomeServiceTaskSampler(TaskSampler):
         randomize_start_rotation: bool = False,
         **init_kwargs,
     ):
-        task_keys_to_task_spec_dicts = cls._filter_task_keys_to_task_spec_dicts(
-            task_keys_to_task_spec_dicts=cls.load_simple_pick_and_place_data_from_path(
+        tasks_to_task_spec_dicts = cls._filter_tasks_to_task_spec_dicts(
+            tasks_to_task_spec_dicts=cls.load_simple_pick_and_place_data_from_path(
                 stage=stage, base_dir=STARTER_HOME_SERVICE_DATA_DIR
             ),
             allowed_task_keys=allowed_task_keys,
@@ -1154,22 +689,21 @@ class HomeServiceTaskSampler(TaskSampler):
         )
         if randomize_start_rotation:
             random_gen = random.Random(1)
-            for task_key in sorted(task_keys_to_task_spec_dicts):
-                for task_spec_dict in task_keys_to_task_spec_dicts[task_key]:
+            for task_key in sorted(tasks_to_task_spec_dicts):
+                for task_spec_dict in tasks_to_task_spec_dicts[task_key]:
                     for room in task_spec_dict["agent_rotations"]:
                         task_spec_dict["agent_rotations"][room] = 360.0 * random_gen.random()
         
         return cls(
             stage=stage,
-            task_type=task_type,
-            task_keys_to_task_spec_dicts=task_keys_to_task_spec_dicts,
+            tasks_to_task_spec_dicts=tasks_to_task_spec_dicts,
             **init_kwargs
         )
 
     @classmethod
-    def _filter_task_keys_to_task_spec_dicts(
+    def _filter_tasks_to_task_spec_dicts(
         cls,
-        task_keys_to_task_spec_dicts: Dict[str, List[Dict[str, Any]]],
+        tasks_to_task_spec_dicts: Dict[str, List[Dict[str, Any]]],
         allowed_task_keys: Optional[Sequence[str]],
         allowed_pickup_objs: Optional[Sequence[str]],
         allowed_start_receps: Optional[Sequence[str]],
@@ -1177,8 +711,8 @@ class HomeServiceTaskSampler(TaskSampler):
         allowed_scene_inds: Optional[Sequence[int]],
     ) -> Dict[str, List[Dict[str, Any]]]:
         if allowed_task_keys is not None:
-            task_keys_to_task_spec_dicts = {
-                task_key: task_keys_to_task_spec_dicts[task_key]
+            tasks_to_task_spec_dicts = {
+                task_key: tasks_to_task_spec_dicts[task_key]
                 for task_key in allowed_task_keys
             }
 
@@ -1188,7 +722,7 @@ class HomeServiceTaskSampler(TaskSampler):
             or allowed_start_receps is not None
             or allowed_target_receps is not None
         ):
-            for task_key in task_keys_to_task_spec_dicts:
+            for task_key in tasks_to_task_spec_dicts:
                 splits = task_key.split("_")
                 pickup_allowed = False
                 start_recep_allowed = False
@@ -1227,22 +761,22 @@ class HomeServiceTaskSampler(TaskSampler):
                 if pickup_allowed and start_recep_allowed and target_recep_allowed:
                     filtered_keys.append(task_key)
         else:
-            filtered_keys = [task_key for task_key in task_keys_to_task_spec_dicts]
+            filtered_keys = [task_key for task_key in tasks_to_task_spec_dicts]
 
-        task_keys_to_task_spec_dicts = {
-            task_key: task_keys_to_task_spec_dicts[task_key]
+        tasks_to_task_spec_dicts = {
+            task_key: tasks_to_task_spec_dicts[task_key]
             for task_key in filtered_keys
         }
 
         if allowed_scene_inds is not None:
-            for task_key, task_spec_dicts in task_keys_to_task_spec_dicts.items():
-                task_keys_to_task_spec_dicts[task_key] = [
+            for task_key, task_spec_dicts in tasks_to_task_spec_dicts.items():
+                tasks_to_task_spec_dicts[task_key] = [
                     task_spec_dict
                     for task_spec_dict in task_spec_dicts
                     if task_spec_dict["scene_index"] in allowed_scene_inds
                 ]
             
-        return task_keys_to_task_spec_dicts
+        return tasks_to_task_spec_dicts
 
     @classmethod
     def load_simple_pick_and_place_data_from_path(
@@ -1272,28 +806,6 @@ class HomeServiceTaskSampler(TaskSampler):
 
         return data
 
-    # @classmethod
-    # def from_scenes_at_runtime(
-    #     cls,
-    #     stage: str,
-    #     allowed_scenes: Sequence[str],
-    #     repeats_before_scene_change: int,
-    #     **init_kwargs,
-    # ):
-    #     assert "scene_to_allowed_inds" not in init_kwargs
-    #     assert repeats_before_scene_change >= 1
-    #     return cls(
-    #         stage=stage,
-    #         scenes_to_task_spec_dicts={
-    #             scene: tuple(
-    #                 {scene: scene, "runtime_sample": True}
-    #                 for _ in range(repeats_before_scene_change)
-    #             )
-    #             for scene in allowed_scenes
-    #         },
-    #         **init_kwargs,
-    #     )
-
     @property
     def length(self) -> float:
         return self.task_spec_iterator.length
@@ -1303,7 +815,7 @@ class HomeServiceTaskSampler(TaskSampler):
         return self.task_spec_iterator.total_unique
 
     @property
-    def last_sampled_task(self) -> Optional[HomeServiceBaseTask]:
+    def last_sampled_task(self) -> Optional[HomeServiceTask]:
         return self._last_sampled_task
 
     @property
@@ -1333,7 +845,7 @@ class HomeServiceTaskSampler(TaskSampler):
         forced_task_spec: Optional[HomeServiceTaskSpec] = None,
         forced_start_scene_type: Optional[str] = None,
         **kwargs
-    ) -> Optional[HomeServiceBaseTask]:
+    ) -> Optional[HomeServiceTask]:
 
         try:
             if forced_task_spec is None:
@@ -1353,41 +865,18 @@ class HomeServiceTaskSampler(TaskSampler):
                 scene_type=forced_start_scene_type,
             )
 
-            if self.task_type == HomeServiceTaskType.SIMPLE_PICK_AND_PLACE:
-
-                # pick, place = sample_pick_and_place_target(
-                #     env=self.env,
-                #     randomizer=self.task_spec_iterator.random,
-                #     pickup_target=pickup_target,
-                #     place_target=place_target
-                # )
-                # self.env.current_task_spec.pickup_target = pick
-                # self.env.current_task_spec.place_target = place
-
-                self._last_sampled_task = HomeServiceSimplePickAndPlaceTask(
-                    sensors=self.sensors,
-                    env=self.env,
-                    max_steps=self.max_steps,
-                    discrete_actions=self.discrete_actions,
-                    smooth_nav=self.smooth_nav,
-                    smoothing_factor=self.smoothing_factor,
-                    force_axis_aligned_start=self.force_axis_aligned_start,
-                    require_done_action=self.require_done_action,
-                    task_spec_in_metrics=self.task_spec_in_metrics,
-                )
-            else:
-                self._last_sampled_task = HomeServiceBaseTask(
-                    sensors=self.sensors,
-                    env=self.env,
-                    max_steps=self.max_steps,
-                    discrete_actions=self.discrete_actions,
-                    smooth_nav=self.smooth_nav,
-                    smoothing_factor=self.smoothing_factor,
-                    force_axis_aligned_start=self.force_axis_aligned_start,
-                    require_done_action=self.require_done_action,
-                    task_spec_in_metrics=self.task_spec_in_metrics,
-                )
-
+            self._last_sampled_task = HomeServiceTask(
+                sensors=self.sensors,
+                env=self.env,
+                max_steps=self.max_steps,
+                discrete_actions=self.discrete_actions,
+                smooth_nav=self.smooth_nav,
+                smoothing_factor=self.smoothing_factor,
+                force_axis_aligned_start=self.force_axis_aligned_start,
+                require_done_action=self.require_done_action,
+                task_spec_in_metrics=self.task_spec_in_metrics,
+            )
+            
         except Exception as e:
             if runtime_sample:
                 get_logger().error(

@@ -6,13 +6,6 @@ import gym.spaces
 import numpy as np
 from allenact.base_abstractions.sensor import Sensor
 from allenact.base_abstractions.task import Task
-from scene_graph.layers.output_utils import postprocess
-from scene_graph.utils.augmentations import FastBaseTransform
-
-from scene_graph.utils.functions import SavePath
-from scene_graph.yolact import Yolact
-from scene_graph.data import Config, cfg, set_cfg, set_dataset
-
 try:
     from allenact.embodiedai.sensors.vision_sensors import RGBSensor
 except ImportError:
@@ -25,37 +18,36 @@ from allenact_plugins.ithor_plugin.ithor_util import include_object_data, round_
 from env.constants import SCENE_TO_SCENE_TYPE, SCENE_TYPE_TO_LABEL, STEP_SIZE
 from env.environment import HomeServiceTHOREnvironment
 from env.tasks import (
-    HomeServiceBaseTask,
+    HomeServiceTask,
     AbstractHomeServiceTask,
 )
 
 
-
 class RGBHomeServiceSensor(
-    RGBSensor[HomeServiceTHOREnvironment, HomeServiceBaseTask]
+    RGBSensor[HomeServiceTHOREnvironment, HomeServiceTask]
 ):
     def frame_from_env(
-        self, env: HomeServiceTHOREnvironment, task: HomeServiceBaseTask
+        self, env: HomeServiceTHOREnvironment, task: HomeServiceTask
     ) -> np.ndarray:
-        if isinstance(task, HomeServiceBaseTask):
+        if isinstance(task, HomeServiceTask):
             return task.env.last_event.frame.copy()
         else:
             raise NotImplementedError(
-                f"Unknown task type {type(task)}, must be an `HomeServiceBaseTask`."
+                f"Unknown task type {type(task)}, must be an `HomeServiceTask`."
             )
 
 
 class DepthHomeServiceSensor(
-    DepthSensor[HomeServiceTHOREnvironment, HomeServiceBaseTask]
+    DepthSensor[HomeServiceTHOREnvironment, HomeServiceTask]
 ):
     def frame_from_env(
-        self, env: HomeServiceTHOREnvironment, task: HomeServiceBaseTask
+        self, env: HomeServiceTHOREnvironment, task: HomeServiceTask
     ) -> np.ndarray:
-        if isinstance(task, HomeServiceBaseTask):
+        if isinstance(task, HomeServiceTask):
             return task.env.controller.last_event.depth_frame.copy()
         else:
             raise NotImplementedError(
-                f"Unknown task type {type(task)}, must be an `HomeServiceBaseTask`."
+                f"Unknown task type {type(task)}, must be an `HomeServiceTask`."
             )
 
 
@@ -71,7 +63,7 @@ class SubtaskType(enum.Enum):
 
 
 class SubtaskHomeServiceSensor(
-    Sensor[HomeServiceTHOREnvironment, HomeServiceBaseTask]
+    Sensor[HomeServiceTHOREnvironment, HomeServiceTask]
 ):
 
     def __init__(
@@ -209,7 +201,7 @@ class SubtaskHomeServiceSensor(
 
 
 class RelativePositionChangeSensor(
-    Sensor[HomeServiceTHOREnvironment, HomeServiceBaseTask]
+    Sensor[HomeServiceTHOREnvironment, HomeServiceTask]
 ):
     def __init__(self, uuid: str = "rel_position_change", base: int = 90, **kwargs: Any):
         observation_space = gym.spaces.Dict(
@@ -313,7 +305,7 @@ class RelativePositionChangeSensor(
 
 
 class InstanceSegmentationSensor(
-    Sensor[HomeServiceTHOREnvironment, HomeServiceBaseTask]
+    Sensor[HomeServiceTHOREnvironment, HomeServiceTask]
 ):
     def __init__(
         self,
@@ -383,7 +375,7 @@ class InstanceSegmentationSensor(
         }
 
 # class YolactObjectDetectionSensor(
-#     Sensor[HomeServiceTHOREnvironment, HomeServiceBaseTask]
+#     Sensor[HomeServiceTHOREnvironment, HomeServiceTask]
 # ):
 #     def __init__(
 #         self,

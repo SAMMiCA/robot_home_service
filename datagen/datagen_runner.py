@@ -5,79 +5,347 @@ import json
 import multiprocessing as mp
 import os
 import pickle
+import platform
 import queue
 import random
+import sys
+import warnings
 import time
+import copy
+from pathlib import Path
 from collections import defaultdict
 from typing import List, Sequence, Set, Dict, Optional, Any, cast
 
+sys.path.insert(0, os.getcwd())
+
 import compress_pickle
 import numpy as np
+import torch
 import tqdm
 from ai2thor.controller import Controller
+from ai2thor.platform import CloudRendering
 
 from allenact.utils.misc_utils import md5_hash_str_as_int
 from allenact_plugins.ithor_plugin.ithor_environment import IThorEnvironment
-from datagen.datagen_constants import OBJECTS_FOR_TEST, TASK_ORDERS
+# from datagen.datagen_constants import TASK_ORDERS
 from datagen.datagen_utils import (
     get_random_seeds,
     find_object_by_type,
-    scene_from_type_idx
+    scene_from_type_idx,
+    remove_objects_until_all_have_identical_meshes,
+    check_object_opens,
+    filter_pickupable,
+    mapping_counts,
+    open_objs
 )
-from env.constants import OBJECT_TYPES_WITH_PROPERTIES, SCENE_TYPE_TO_SCENES, STARTER_HOME_SERVICE_DATA_DIR, THOR_COMMIT_ID
+from datagen.datagen_constants import NUM_TEST_TASKS, NUM_TRAIN_TASKS, NUM_VAL_TASKS, PICKUPABLE_RECEPTACLE_PAIRS, PICKUP_OBJECTS_FOR_TEST, GOOD_4_ROOM_HOUSES, STAGE_TO_DEST_NUM_SCENES, STAGE_TO_VALID_TASK_TO_SCENES, STAGE_TO_VALID_TASKS
+from env.constants import IOU_THRESHOLD, OBJECT_TYPES_WITH_PROPERTIES, SCENE_TYPE_TO_SCENES, STARTER_HOME_SERVICE_DATA_DIR, THOR_COMMIT_ID
 from env.environment import (
-    HomeServiceTHOREnvironment,
+    HomeServiceEnvironment,
     HomeServiceTaskSpec,
 )
+from env.utils import extract_obj_data
+from utils.multiprocessing_utils import Manager, Worker, get_logger
+
+
+NUM_TRAIN_UNSEEN_EPISODES = 1_000  # 1 episode per scene
+NUM_TRAIN_SCENES = 10_000  # N episodes per scene
+NUM_VALID_SCENES = 1_000  # 10 episodes per scene
+NUM_TEST_SCENES = 1_000  # 1 episode per scene
+
+MAX_TRIES = 40
+EXTENDED_TRIES = 10
 
 mp = mp.get_context("spawn")
 
+# Includes types used in both open and pickup actions:
+VALID_TARGET_TYPES = {
+    "AlarmClock",
+    "AluminumFoil",
+    "Apple",
+    "BaseballBat",
+    "BasketBall",
+    "Blinds",
+    "Book",
+    "Boots",
+    "Bottle",
+    "Bowl",
+    "Box",
+    "Bread",
+    "ButterKnife",
+    "CD",
+    "Cabinet",
+    "Candle",
+    "CellPhone",
+    "Cloth",
+    "CreditCard",
+    "Cup",
+    "DishSponge",
+    "Drawer",
+    "Dumbbell",
+    "Egg",
+    "Footstool",
+    "Fork",
+    "Fridge",
+    "HandTowel",
+    "Kettle",
+    "KeyChain",
+    "Knife",
+    "Ladle",
+    "Laptop",
+    "LaundryHamper",
+    "Lettuce",
+    "Microwave",
+    "Mug",
+    "Newspaper",
+    "Pan",
+    "PaperTowelRoll",
+    "Pen",
+    "Pencil",
+    "PepperShaker",
+    "Pillow",
+    "Plate",
+    "Plunger",
+    "Pot",
+    "Potato",
+    "RemoteControl",
+    "Safe",
+    "SaltShaker",
+    "ScrubBrush",
+    "ShowerCurtain",
+    "ShowerDoor",
+    "SoapBar",
+    "SoapBottle",
+    "Spatula",
+    "Spoon",
+    "SprayBottle",
+    "Statue",
+    "TableTopDecor",
+    "TeddyBear",
+    "TennisRacket",
+    "TissueBox",
+    "Toilet",
+    "ToiletPaper",
+    "Tomato",
+    "Towel",
+    "Vase",
+    "Watch",
+    "WateringCan",
+    "WineBottle",
+}
 
-def generate_one_task_order_given_initial_conditions(
-    controller: Controller,
+
+def get_scene_limits_for_task(
+    env: HomeServiceEnvironment,
+    # task: Dict[str, Any],
+    task: str,
     scene: str,
-    start_kwargs: dict,
-    target_kwargs: dict,
-    pickup_object_type: str,
-    start_receptacle_type: str,
-    place_receptacle_type: str,
+    object_types_to_not_move: Set[str] = set(),
+):
+    controller = env.controller
+    pick, recep = task.split("_")[-2], task.split("_")[-1]
+    
+    # Invalid Scene
+    if not env.procthor_reset(scene_name=scene, force_reset=True):
+        print(f"Cannot reset scene {scene}")
+        return None
+
+    if not remove_objects_until_all_have_identical_meshes(controller):
+        print(f"Failed to remove_objects_until_all_have_identical_meshes in {scene}")
+        return None
+
+    all_objects = controller.last_event.metadata["objects"]
+    if any(o["isBroken"] for o in all_objects):
+        print(f"Broken objects in {scene}")
+        return None
+
+    room_reachable, reachability_meta = env.all_rooms_reachable()
+    if not room_reachable:
+        print(f"Unreachable rooms in {scene}: {reachability_meta}")
+        return None
+    
+    openable_objects = env.obj_id_with_cond_to_room(
+        lambda o: o["openable"]
+        and not o["pickupable"]
+        and o["objectType"] in VALID_TARGET_TYPES
+    )
+
+    meta_rps = controller.step("GetReachablePositions").metadata
+    if meta_rps["lastActionSuccess"]:
+        rps = meta_rps["actionReturn"][:]
+    else:
+        print(
+            f"In {scene}, couldn't get reachable positions despite all rooms being reachable (?)"
+        )
+        return None
+    
+    all_objects = env.ids_to_objs()
+
+    room_to_openable_ids = defaultdict(list)
+    for oid, room in openable_objects.items():
+        interactable_poses = controller.step(
+            "GetInteractablePoses", objectId=oid, positions=rps,
+        ).metadata["actionReturn"]
+        if interactable_poses is None or len(interactable_poses) == 0:
+            continue
+
+        could_open_close, could_open, could_close = check_object_opens(
+            all_objects[oid], controller, return_open_closed=True
+        )
+        if not could_close:
+            if could_open:
+                print(f"Couldn't close {oid} fully in {scene}")
+                return None
+            continue
+        if could_open_close:
+            room_to_openable_ids[room].append(oid)
+
+    pickupable_objects = filter_pickupable(
+        objects=[
+            all_objects[obj]
+            for obj in all_objects
+            if all_objects[obj]["objectType"] in VALID_TARGET_TYPES
+        ],
+        object_types_to_not_move=object_types_to_not_move
+    )
+
+    if len(pickupable_objects) == 0:
+        print(f"No objects to pickup in {scene}")
+        return None
+
+    # Check Pickup target existence
+    pickup_object = next(
+        (
+            obj 
+            for obj in pickupable_objects
+            if obj["objectType"] == pick
+        ),
+        None
+    )
+    if pickup_object is None:
+        print(f'No {pick} in {scene}.')
+        return None
+        
+    receps_per_room = {
+        room: env.static_receptacles_in_room(room) for room in env.room_to_poly
+    }
+
+    for room, rids in receps_per_room.items():
+        reachable_ids = []
+        for rid in rids:
+            interactable_poses = controller.step(
+                "GetInteractablePoses", objectId=rid, positions=rps,
+            ).metadata["actionReturn"]
+            if interactable_poses is None or len(interactable_poses) == 0:
+                continue
+            else:
+                reachable_ids.append(rid)
+        receps_per_room[room] = reachable_ids
+
+    # Check target receptacle existence
+    receps = []
+    for room, rids in receps_per_room.items():
+        receps.extend(
+            [
+                rid
+                for rid in rids
+                if all_objects[rid]["objectType"] == recep
+            ]
+        )
+    
+    # Only 1 recep should exist in the house...
+    if (
+        recep != "User"
+        and len(receps) != 1
+    ):
+        if len(receps) == 0:
+            print(f'No {recep} in {scene}')
+        else:
+            print(f'More than 1 {recep}s in {scene}')
+        return None
+
+    # num_receps_per_room = mapping_counts(receps_per_room)
+    # if any(v < 2 for v in num_receps_per_room.values()):
+    #     print(
+    #         f"Less than 2 receptacles in some room(s) in {scene}: {num_receps_per_room}"
+    #     )
+    #     return None
+
+    return dict(
+        pickupables=pickupable_objects,             # In entire house
+        room_openables={**room_to_openable_ids},    # in each room
+        room_receptacles={**receps_per_room},            # in each room
+    )
+
+def generate_one_home_service_given_initial_conditions(
+    env: HomeServiceEnvironment,
+    scene: str,
+    task: str,
+    init_kwargs: dict,
     agent_pos: Dict[str, float],
     agent_rot: Dict[str, float],
+    starting_room: str,
+    target_room: str,
+    # single_room: str,
+    # object_types_to_not_move: Set[str],
+    # allow_putting_objects_away: bool = False,
+    # possible_openable_ids: Optional[List[str]] = None,
 ):
+    controller = env.controller
+    pick, recep = task.split("_")[-2], task.split("_")[-1]
 
-    # Start position
-    controller.reset(scene)
+    env.procthor_reset(scene_name=scene, force_reset=True)
     controller.step(
-        "TeleportFull", horizon=0, standing=True, rotation=agent_rot, **agent_pos
+        "TeleportFull",
+        horizon=0,
+        standing=True,
+        rotation=agent_rot,
+        **agent_pos,
     )
     if not controller.last_event.metadata["lastActionSuccess"]:
-        print("a")
-        return None, None
+        print(controller.last_event.metadata["errorMessage"])
+        return None, None, None
 
-    excluded_receptacles = [start_receptacle_type]
-    if place_receptacle_type != "User":
-        excluded_receptacles.append(place_receptacle_type)
-    controller.step("InitialRandomSpawn", excludedReceptacles=excluded_receptacles, **start_kwargs)
+    if not remove_objects_until_all_have_identical_meshes(controller):
+        print("Error initially removing objects")
+        return None, None, None
+
+    # Works around a labeling issue in THOR for floor lamps (pickupable)
+    excluded_object_ids_for_floor_lamp = [
+        o["objectId"]
+        for o in controller.last_event.metadata["objects"]
+        if o["objectType"] == "FloorLamp"
+    ]
+
+    controller.step(
+        "InitialRandomSpawn",
+        **{
+            **init_kwargs, 
+            "excludedReceptacles": init_kwargs["excludedReceptacles"].append(recep)
+        },
+        excludedObjectIds=excluded_object_ids_for_floor_lamp,
+    )
     if not controller.last_event.metadata["lastActionSuccess"]:
-        print("b")
-        return None, None
+        print(controller.last_event.metadata["errorMessage"])
+        return None, None, None
 
     for _ in range(12):
         controller.step("Pass")
 
-    if any(o["isBroken"] for o in controller.last_event.metadata["objects"]):
-        print("c")
-        return None, None
-
     # get initial and post random spawn object data
-    objects_after_first_irs = controller.last_event.metadata["objects"]
-    openable_objects = [
-        obj
-        for obj in objects_after_first_irs
-        if obj["openable"] and not obj["pickupable"]
-    ]
-    random.shuffle(openable_objects)
-        
+    objects_after_first_irs = copy.deepcopy(env.objects())
+
+    if any(o["isBroken"] for o in objects_after_first_irs):
+        print("Broken objects after first irs")
+        return None, None, None
+
+    # What if opening moved a pickupable? Get the updated list!
+    objects_after_first_irs = copy.deepcopy(env.objects())
+
+    if any(o["isBroken"] for o in objects_after_first_irs):
+        print("Broken objects after opening")
+        return None, None, None
+
     # accounts for possibly a rare event that I cannot think of, where opening
     # a non-pickupable object moves a pickupable object.
     pickupable_objects_after_first_irs = [
@@ -90,582 +358,825 @@ def generate_one_task_order_given_initial_conditions(
         (
             obj 
             for obj in pickupable_objects_after_first_irs
-            if obj["objectType"] == pickup_object_type
+            if obj["objectType"] == pick
         ),
         None
     )
-    assert pickup_target is not None
+    if pickup_target is None:
+        print(f"there is no pickup target {pick} in the scene {scene}")
+        return None, None, None
+
+    recep_start = pickup_target["parentReceptacles"]
+    if recep_start is not None:
+        if recep in [
+            robj["objectType"]
+            for rid, robj in env.ids_to_objs(source=objects_after_first_irs).items()
+            if rid in recep_start
+        ]:
+            print(f"pickup target {pick} is already placed on the recep target {recep}")
+            return None, None, None
+
+    # Ensure that the pickup target is interactable
+    rps = controller.step("GetReachablePositions").metadata["actionReturn"][:]
+    pickup_interactable_poses = controller.step(
+        "GetInteractablePoses",
+        objectId=pickup_target["objectId"],
+        positions=rps,
+    ).metadata["actionReturn"]
+    if pickup_interactable_poses is None or len(pickup_interactable_poses) == 0:
+        print(f"pickup target {pick} is spawned at not interactable position...")
+        return None, None, None
 
     controller.step(
         "TeleportFull", horizon=0, standing=True, rotation=agent_rot, **agent_pos
     )
     if not controller.last_event.metadata["lastActionSuccess"]:
-        print("d")
-        return None, None
+        print(controller.last_event.metadata["errorMessage"])
+        return None, None, None
 
-    pickupable_objects_after_shuffle: Optional[List[Dict[str, Any]]] = None
-
-    # choose one of the place receptacle object and open it
-    start_receptacles = [
-        obj
-        for obj in objects_after_first_irs
-        if obj["objectType"] == start_receptacle_type
-    ]
-    random.shuffle(start_receptacles)
-    
-    place_receptacles = [
-        obj
-        for obj in objects_after_first_irs
-        if obj["objectType"] == place_receptacle_type
-    ]
-    random.shuffle(place_receptacles)
-
+    # Ensure the recep target 
     objs_to_open = []
-    place_success = False if place_receptacle_type != "User" else True
-    for place_receptacle in place_receptacles:
-        controller.step(
-            "GetSpawnCoordinatesAboveReceptacle",
-            objectId=place_receptacle["objectId"],
-            anywhere=True,
-        )
-        if not controller.last_event.metadata["lastActionSuccess"]:
-            continue
-        
-        coords_above_place_receptacle = controller.last_event.metadata["actionReturn"]
-        random.shuffle(coords_above_place_receptacle)
+    if recep != "User":
+        recep_targets = [
+            env.ids_to_objs(source=objects_after_first_irs)[obj]
+            for obj in env.static_receptacles_in_room(room_id=target_room)
+            if env.ids_to_objs(source=objects_after_first_irs)[obj]["objectType"] == recep
+        ]
+        if len(recep_targets) == 0:
+            print(f"there is no place recep target {recep} in the scene {scene}")
+            return None, None, None
 
-        while len(coords_above_place_receptacle) > 0:
-            controller.step(
-                "PlaceObjectAtPoint",
-                objectId=pickup_target["objectId"],
-                position=coords_above_place_receptacle.pop(),
-            )
-            if not controller.last_event.metadata["lastActionSuccess"]:
-                continue
-            else:
-                place_success = True
-                break
-        
-        if place_success:
-            if place_receptacle["openable"]:
+        st = random.getstate()
+        random.seed(7654321)
+        random.shuffle(recep_targets)
+        random.setstate(st)
+
+        for recep_target in recep_targets:
+            # Open recep_target
+            if recep_target["openable"]:
+                start_openness = recep_target["openness"]
+                if not check_object_opens(recep_target, controller):
+                    print(f"Failed to open & close recep {recep} in the scene {scene}")
+                    return None, None, None
+
                 controller.step(
                     "OpenObject",
-                    objectId=place_receptacle["objectId"],
-                    openness=1,
+                    objectId=recep_target["objectId"],
+                    openness=1.0,
                     forceAction=True,
                 )
-                objs_to_open.append(place_receptacle["name"])
-            break
-    
-    # if not place_success:
-    #     print('relocate objects in place_receptacles')
-    #     for place_receptacle in place_receptacles:
-    #         if place_receptacle["receptacleObjectIds"] is None:
-    #             continue
-    #         receptacle_objects = [
-    #             obj
-    #             for obj in objects_after_first_irs
-    #             if obj["objectId"] in place_receptacle["receptacleObjectIds"]
-    #         ]
-    #         tt = [o['objectType'] for o in receptacle_objects]
-    #         print(f'{tt} | {place_receptacle["objectType"]}')
-    #         excluded_object_ids = [
-    #             obj["objectId"]
-    #             for obj in objects_after_first_irs
-    #             if obj not in receptacle_objects
-    #         ]
-    #         controller.step(
-    #             "InitialRandomSpawn",
-    #             excludedObjectIds=excluded_object_ids,
-    #             excludedReceptacles=[place_receptacle_type, start_receptacle_type],
-    #             **target_kwargs
-    #         )
-    #         if not controller.last_event.metadata["lastActionSuccess"]:
-    #             print('1')
-    #             continue
-
-    #         controller.step(
-    #             "GetSpawnCoordinatesAboveReceptacle",
-    #             objectId=place_receptacle["objectId"],
-    #             anywhere=True,
-    #         )
-    #         if not controller.last_event.metadata["lastActionSuccess"]:
-    #             print('2')
-    #             continue
-            
-    #         coords_above_place_receptacle = controller.last_event.metadata["actionReturn"]
-    #         random.shuffle(coords_above_place_receptacle)
-
-    #         for retry_ind in range(10):
-    #             controller.step(
-    #                 "PlaceObjectAtPoint",
-    #                 objectId=pickup_target["objectId"],
-    #                 position=coords_above_place_receptacle.pop(),
-    #             )
-    #             if not controller.last_event.metadata["lastActionSuccess"]:
-    #                 print('3')
-    #                 print(controller.last_event)
-    #                 continue
-    #             else:
-    #                 place_success = True
-    #                 break
-            
-    #         if place_success:
-    #             if place_receptacle["openable"]:
-    #                 controller.step(
-    #                     "OpenObject",
-    #                     objectId=place_receptacle["objectId"],
-    #                     openness=1,
-    #                     forceAction=True,
-    #                 )
-    #                 objs_to_open.append(place_receptacle["name"])
-    #             break
                 
-    start_success = False
-    for start_receptacle in start_receptacles:
-        controller.step(
-            "GetSpawnCoordinatesAboveReceptacle",
-            objectId=start_receptacle["objectId"],
-            anywhere=True,
-        )
-        if not controller.last_event.metadata["lastActionSuccess"]:
-            continue
-        
-        coords_above_start_receptacle = controller.last_event.metadata["actionReturn"]
-        random.shuffle(coords_above_start_receptacle)
+                # What if opening moved a pickupable? Get the updated list!
+                objects_after_first_irs = copy.deepcopy(env.objects())
 
-        while len(coords_above_start_receptacle) > 0:
+                if any(o["isBroken"] for o in objects_after_first_irs):
+                    print("Broken objects after opening")
+                    return None, None, None
+
+            # Place the pickup target above the recep target to examine the possibility
             controller.step(
-                "PlaceObjectAtPoint",
-                objectId=pickup_target["objectId"],
-                position=coords_above_start_receptacle.pop(),
+                "GetSpawnCoordinatesAboveReceptacle",
+                objectId=recep_target["objectId"],
+                anywhere=True,
             )
             if not controller.last_event.metadata["lastActionSuccess"]:
+                print(controller.last_event.metadata["errorMessage"])
+                return None, None, None
+        
+            recep_pts = controller.last_event.metadata["actionReturn"][:]
+            random.shuffle(recep_pts)
+
+            while len(recep_pts) > 0:
+                controller.step(
+                    "PlaceObjectAtPoint",
+                    objectId=pickup_target["objectId"],
+                    position=recep_pts.pop(),
+                )
+                if not controller.last_event.metadata["lastActionSuccess"]:
+                    continue
+                else:
+                    objects_after_check_receps = copy.deepcopy(env.objects())
+                    pickupable_objects_after_check_receps = [
+                        obj
+                        for obj in objects_after_check_receps
+                        if obj["pickupable"]
+                    ]
+                    for o in pickupable_objects_after_check_receps:
+                        if o["isBroken"]:
+                            print(
+                                f"In scene {scene} object {o['objectId']} broke during setup."
+                            )
+                            return None, None, None
+                        if o["objectType"] == pick:
+                            pickup_target_after_check_recep = o
+                    
+                    o_pos = pickup_target_after_check_recep["position"]
+                    check_positions = [
+                        {
+                            "x": o_pos["x"] + 0.001 * x_off,
+                            "y": o_pos["y"] + 0.001 * y_off,
+                            "z": o_pos["z"] + 0.001 * z_off,
+                        }
+                        for x_off in [0, -1, 1]
+                        for y_off in [0, 1, 2]
+                        for z_off in [0, -1, 1]
+                    ]
+                    controller.step(
+                        "TeleportObject",
+                        objectId=pickup_target_after_check_recep["objectId"],
+                        positions=check_positions,
+                        rotation=pickup_target_after_check_recep["rotation"],
+                        makeUnbreakable=True,
+                    )
+                    if not controller.last_event.metadata["lastActionSuccess"]:
+                        continue
+
+                    break
+        
+            if not controller.last_event.metadata["lastActionSuccess"]:
+                print(f"No possible points to place the target {pick} on recep {recep_target['objectId']}.")
+                # reset openness of the current recep target
+                if recep_target["openable"]:
+                    controller.step(
+                        "OpenObject",
+                        objectId=recep_target["objectId"],
+                        openness=start_openness,
+                        forceAction=True,
+                    )
                 continue
             else:
-                start_success = True
+                if recep_target["openable"]:
+                    objs_to_open.append(recep_target)
                 break
         
-        if start_success:
-            if start_receptacle["openable"]:
-                controller.step(
-                    "OpenObject",
-                    objectId=start_receptacle["objectId"],
-                    openness=1,
-                    forceAction=True,
-                )
-                objs_to_open.append(start_receptacle["name"])
-            for _ in range(12):
-                # This shouldn't be necessary but we run these actions
-                # to let physics settle.
-                controller.step("Pass")
-            pickupable_objects_after_shuffle = [
-                obj
-                for obj in controller.last_event.metadata["objects"]
-                if obj['pickupable']
-            ]
-            break
+        if not controller.last_event.metadata["lastActionSuccess"]:
+            print(f"No possible candidate for recep {recep} to place the target {pick} in the scene {scene}.")
+            return None, None, None
 
-    # if not start_success:
-    #     for start_receptacle in start_receptacles:
-    #         if start_receptacle["receptacleObjectIds"] is None:
-    #             continue
-    #         receptacle_objects = [
-    #             obj
-    #             for obj in objects_after_first_irs
-    #             if obj["objectId"] in start_receptacle["receptacleObjectIds"]
-    #         ]
-    #         excluded_object_ids = [
-    #             obj["objectId"]
-    #             for obj in objects_after_first_irs
-    #             if obj not in receptacle_objects
-    #         ]
-    #         excluded_receptacles = [start_receptacle_type]
-    #         if place_receptacle_type != "User":
-    #             excluded_receptacles.append(place_receptacle_type)
-    #         controller.step(
-    #             "InitialRandomSpawn",
-    #             excludedObjectIds=excluded_object_ids,
-    #             excludedReceptacles=excluded_receptacles,
-    #             **target_kwargs
-    #         )
-    #         if not controller.last_event.metadata["lastActionSuccess"]:
-    #             continue
-
-    #         controller.step(
-    #             "GetSpawnCoordinatesAboveReceptacle",
-    #             objectId=start_receptacle["objectId"],
-    #             anywhere=True,
-    #         )
-    #         if not controller.last_event.metadata["lastActionSuccess"]:
-    #             continue
-            
-    #         coords_above_start_receptacle = controller.last_event.metadata["actionReturn"]
-    #         random.shuffle(coords_above_start_receptacle)
-
-    #         for retry_ind in range(10):
-    #             controller.step(
-    #                 "PlaceObjectAtPoint",
-    #                 objectId=pickup_target["objectId"],
-    #                 position=coords_above_start_receptacle.pop(),
-    #             )
-    #             if not controller.last_event.metadata["lastActionSuccess"]:
-    #                 continue
-    #             else:
-    #                 start_success = True
-    #                 break
-            
-    #         if start_success:
-    #             if start_receptacle["openable"]:
-    #                 controller.step(
-    #                     "OpenObject",
-    #                     objectId=start_receptacle["objectId"],
-    #                     openness=1,
-    #                     forceAction=True,
-    #                 )
-    #                 objs_to_open.append(start_receptacle["name"])
-    #             break
-
-    for o in controller.last_event.metadata["objects"]:
-        if o["isBroken"]:
-            print(
-                f"In scene {controller.last_event.metadata['objects']},"
-                f" object {o['name']} broke during setup."
-            )
-            return None, None
-
-    if not start_success or not place_success:
-        print(f'start_success: {start_success} | place_success: {place_success}')
-        return None, None
-
-    pickupable_objects_after_first_irs.sort(key=lambda x: x["name"])
-    pickupable_objects_after_shuffle.sort(key=lambda x: x["name"])
-
-    if any(
-        o0["name"] != o1["name"]
-        for o0, o1 in zip(
-            pickupable_objects_after_first_irs, pickupable_objects_after_shuffle
+    else:
+        # Agent holding pickup target at the starting position
+        controller.step(
+            "PickupObject",
+            objectId=pickup_target["objectId"],
+            forceAction=True,
         )
-    ):
-        print("Pickupable object names don't match after shuffle!")
-        return None, None
+        if not controller.last_event.metadata["lastActionSuccess"]:
+            print(f"The agent failed to hold the pickup target {pick}")
+            return None, None, None
 
+        objects_after_check_receps = copy.deepcopy(env.objects())
+        pickupable_objects_after_check_receps = [
+            obj
+            for obj in objects_after_check_receps
+            if obj["pickupable"]
+        ]
+
+    # Ensure all rooms are reachable after the irs from the starting positions
+    controller.step(
+        "TeleportFull", horizon=0, standing=True, rotation=agent_rot, **agent_pos,
+    )
+    if not controller.last_event.metadata["lastActionSuccess"]:
+        print(controller.last_event.metadata["errorMessage"])
+        return None, None, None
+
+    room_reachable, reachability_meta = env.all_rooms_reachable()
+    if not room_reachable:
+        print(f"Unreachable rooms in {scene} after first irs: {reachability_meta}")
+        return None, None, None
+    
+    pickupable_objects_after_first_irs.sort(key=lambda x: x["objectId"])
+    pickupable_objects_after_check_receps.sort(key=lambda x: x["objectId"])
+    if any(
+        o0["objectId"] != o1["objectId"]
+        for o0, o1 in zip(pickupable_objects_after_first_irs, pickupable_objects_after_check_receps)
+    ):
+        print("Pickupable object ids don't match after shuffle!")
+        return None, None, None
+
+    for o0, o1 in zip(pickupable_objects_after_first_irs, pickupable_objects_after_check_receps):
+        if o0["objectId"] == pickup_target["objectId"]:
+            continue
+        o0["position"] = o1["position"]
+        o0["rotation"] = o1["rotation"]
+
+    # (starting, target, open)
     return (
         [
             {
-                "name": pickupable_objects_after_shuffle[i]["name"],
-                "objectName": pickupable_objects_after_shuffle[i]["name"],
-                "position": pickupable_objects_after_shuffle[i]["position"],
-                "rotation": pickupable_objects_after_shuffle[i]["rotation"],
+                "name": pickupable_objects_after_first_irs[i]["name"],
+                "objectName": pickupable_objects_after_first_irs[i]["name"],
+                "position": pickupable_objects_after_first_irs[i]["position"],
+                "rotation": pickupable_objects_after_first_irs[i]["rotation"],
             }
-            for i in range(len(pickupable_objects_after_shuffle))
+            for i in range(len(pickupable_objects_after_first_irs))
         ],
         [
             {
-                "name": open_obj_name,
-                "objectName": open_obj_name,
-                "objectId": next(
-                    o["objectId"]
-                    for o in openable_objects
-                    if o["name"] == open_obj_name
-                ),
+                "name": pickupable_objects_after_check_receps[i]["name"],
+                "objectName": pickupable_objects_after_check_receps[i]["name"],
+                "position": pickupable_objects_after_check_receps[i]["position"],
+                "rotation": pickupable_objects_after_check_receps[i]["rotation"],
             }
-            for open_obj_name in objs_to_open
-        ]
+            for i in range(len(pickupable_objects_after_check_receps))
+        ],
+        [
+            {
+                **obj,
+            }
+            for obj in objs_to_open
+        ],
     )
 
-
-def generate_task_specs_for_task_orders(
+def generate_home_service_episode_for_task(
     stage_seed: int,
-    env: HomeServiceTHOREnvironment,
-    task_orders: Sequence[Dict[str, Any]],
-    scene_inds: Sequence[int],
+    scene: str,
+    env: HomeServiceEnvironment,
+    house_count: int,
+    scene_count: int,
+    task: str,
+    stage: str = "train",
+    house_i: int = 0,
+    scene_i: int = 0,
     force_visible: bool = True,
     place_stationary: bool = False,
-    rotation_increment: int = 30,
-) -> dict:
+    rotation_increment: int = 90,
+    allow_moveable_in_goal_randomization: bool = False,
+    limits: Optional[Dict[str, Any]] = None,
+    object_types_to_not_move: Set[str] = set(),
+    # obj_name_to_avoid_positions=obj_name_to_avoid_positions,
+) -> Optional[Any]:
     if 360 % rotation_increment != 0:
         raise ValueError("Rotation increment must be a factor of 360")
 
+    # if obj_name_to_avoid_positions is None:
+    #     obj_name_to_avoid_positions = defaultdict(
+    #         lambda: np.array([[-1000, -1000, -1000]])
+    #     )
+
     controller = env.controller
+    pick, recep = task.split("_")[-2], task.split("_")[-1]
 
-    out: dict = dict()
-    for task_order in task_orders:
-        start_scene_types = task_order["startSceneType"]
-        random.shuffle(start_scene_types)
-        start_scene_type = next(iter(start_scene_types), None)
-        assert start_scene_type is not None
-        target_scene_type = task_order["targetSceneType"]
+    print(f"Task {stage} {task} for {scene}")
 
-        target_receptacle_type = task_order["targetReceptacleType"]
-        start_receptacle_type = task_order["startReceptacleType"]
-        pickup_object_types = task_order["pickupObjectTypes"]
-        for pickup_object_type in pickup_object_types:
-            task_key = (
-                f'Pick_{pickup_object_type}_On_{start_receptacle_type}_And_Place_{target_receptacle_type}'
-                if target_receptacle_type != "User" else
-                f'Bring_Me_{pickup_object_type}_On_{start_receptacle_type}'
+    seed = md5_hash_str_as_int(f"{stage_seed}|{task}|{scene}")
+    random.seed(seed)
+
+    if limits is None:
+        print(f"Re-computing limits for Task {task} {stage} {scene} {house_i} {scene_i}???????")
+        if env.num_rooms(scene) != 4:
+            print(f"{scene} has {env.num_rooms(scene)} rooms. Skipping.")
+            return None
+        
+        # House loaded in get_scene_limits
+        limits = get_scene_limits_for_task(
+            env,
+            task,
+            scene,
+            object_types_to_not_move,
+        )
+        if limits is None:
+            print(f"Cannot use scene {scene}.")
+            return None
+    
+    else:
+        if not env.procthor_reset(scene_name=scene, force_reset=True):
+            print(f"Cannot reset scene {scene}")
+            return None
+
+        if not remove_objects_until_all_have_identical_meshes(controller):
+            print(
+                f"Failed to remove_objects_until_all_have_identical_meshes in {scene}"
             )
-            out[task_key] = []
-            for i in scene_inds:                   
-                target_scene = scene_from_type_idx(target_scene_type, i)
-                seed = md5_hash_str_as_int(f"{stage_seed}|{target_scene}")
-                random.seed(seed)
+            return None
 
-                controller.reset(target_scene)
-                pickup_objects = find_object_by_type(
-                    controller.last_event.metadata["objects"],
-                    pickup_object_type
+    scene_has_openable = 0 != len(
+        [
+            o
+            for o in controller.last_event.metadata["objects"]
+            if o["openable"] and not o["pickupable"]
+        ]
+    )
+    if not scene_has_openable:
+        warnings.warn(f"HOUSE {scene} HAS NO OPENABLE OBJECTS")
+
+    evt = controller.step("GetReachablePositions")
+    rps: List[Dict[str, float]] = evt.metadata["actionReturn"][:]
+    rps.sort(key=lambda d: (round(d["x"], 2), round(d["z"], 2)))
+    rotations = np.arange(0, 360, rotation_increment)
+
+    room_to_rps = copy.deepcopy(env.room_to_reachable_positions())
+    for room, room_rps in room_to_rps.items():
+        room_rps.sort(key=lambda d: (round(d["x"], 2), round(d["z"], 2)))
+
+    assert house_i < house_count
+    assert scene_i < scene_count
+
+    try_count = 0
+    # TODO:
+    # Assign start room type & start receptacle type
+    # If target_receptacle type is openable, it should be opened for '''easy''' tasks
+    # define possible_room
+
+    position_count_offset = 0
+    # room that has receptacle in it
+    all_objects = env.ids_to_objs()
+    possible_starting_rooms = sorted(list(env.room_to_poly.keys()))
+    possible_target_rooms = []
+    if recep != "User":
+        possible_target_rooms = [
+            room_id
+            for room_id, rids in limits["room_receptacles"].items()
+            for rid in rids
+            if all_objects[rid]["objectType"] == recep
+        ]
+
+    st = random.getstate()
+    random.seed(1234567)
+    random.shuffle(possible_starting_rooms)
+    random.shuffle(possible_target_rooms)
+    random.setstate(st)
+
+    while True:
+        try_count += 1
+        if try_count > MAX_TRIES + EXTENDED_TRIES:
+            print(f"Something wrong with house {scene} scene_i {scene_i}. Skipping")
+            return None
+        if try_count == MAX_TRIES + 1:
+            print(f"Something wrong with house {scene} scene_i {scene_i}. Trying another room.")
+            if len(set(possible_starting_rooms)) > 1 or len(set(possible_target_rooms)) > 1:
+                if len(set(possible_starting_rooms)) > 1:
+                    possible_starting_rooms = [r for r in possible_starting_rooms if r != starting_room]
+                if len(set(possible_target_rooms)) > 1:
+                    possible_target_rooms = [r for r in possible_target_rooms if r != target_room]
+            else:
+                return None
+
+        episode_seed_string = f"{task}|{scene}|ind_{scene_i}|tries_{try_count}|counts_{position_count_offset}|seed_{stage_seed}"
+        seed = md5_hash_str_as_int(episode_seed_string)
+        random.seed(seed)
+
+        starting_room = cast(str, possible_starting_rooms[scene_i % len(possible_starting_rooms)])
+        if recep != "User":
+            target_room = cast(str, possible_target_rooms[scene_i % len(possible_target_rooms)])
+        else:
+            target_room = starting_room
+        
+        # avoid agent being unable to teleport to position
+        # due to object being placed there
+        pos = random.choice(room_to_rps[starting_room])
+        rot = {"x": 0, "y": int(random.choice(rotations)), "z": 0}
+
+        # used to make sure the positions of the objects
+        # are not always the same across the same scene.
+        init_kwargs = {
+            "randomSeed": random.randint(0, int(1e7) - 1),
+            "forceVisible": force_visible,
+            "placeStationary": place_stationary,
+            "excludedReceptacles": ["ToiletPaperHanger"],
+            "allowMoveable": allow_moveable_in_goal_randomization,
+        }
+
+        (
+            starting_poses,
+            target_poses,
+            objs_to_open,
+        ) = generate_one_home_service_given_initial_conditions(
+            env=env,
+            scene=scene,
+            task=task,
+            init_kwargs=init_kwargs,
+            agent_pos=pos,
+            agent_rot=rot,
+            starting_room=starting_room,
+            target_room=target_room,
+            # single_room=single_room,
+            # object_types_to_not_move=object_types_to_not_move,
+            # allow_putting_objects_away=MAX_TRIES >= try_count >= MAX_TRIES // 2,
+            # possible_openable_ids=limits["room_openables"][single_room]
+            # if single_room in limits["room_openables"]
+            # else [],
+        )
+        
+        if starting_poses is None or target_poses is None:
+            print(f"{episode_seed_string}: Failed during generation...")
+            continue
+        
+        task_spec_dict = {
+            "pickup_object": pick,
+            "target_receptacle": recep,
+            "agent_position": pos,
+            "agent_rotation": int(rot["y"]),
+            "starting_poses": starting_poses,
+            "target_poses": target_poses,
+            "objs_to_open": objs_to_open,
+        }
+
+        try:
+            for _ in range(1):
+                env.reset(
+                    task_spec=HomeServiceTaskSpec(
+                        scene=scene,
+                        **task_spec_dict,
+                    ),
+                    raise_on_inconsistency=True,
                 )
-
-                # NO pickup_object in the target_scene
-                if len(pickup_objects) == 0:
-                    continue
-
-                start_receptacles = find_object_by_type(
-                    controller.last_event.metadata["objects"],
-                    start_receptacle_type
-                )
-
-                if len(start_receptacles) == 0:
-                    continue
-
-                target_receptacles = find_object_by_type(
-                    controller.last_event.metadata["objects"],
-                    target_receptacle_type
-                )
-
-                if len(target_receptacles) == 0 and target_receptacle_type != "User":
-                    continue
-                
-                agent_pos_rots = dict()
-                for scene_type in SCENE_TYPE_TO_SCENES:
-                    scene = scene_from_type_idx(scene_type, i)
-                    seed = md5_hash_str_as_int(f"{stage_seed}|{scene}")
-                    random.seed(seed)
-
-                    controller.reset(scene)
-                    evt = controller.step("GetReachablePositions")
-                    rps: List[Dict[str, float]] = evt.metadata["actionReturn"]
-                    rps.sort(key=lambda d: (round(d["x"], 2), round(d["z"], 2)))
-                    rotations = np.arange(0, 360, rotation_increment)
-
-                    pos = random.choice(rps)
-                    rot = {"x": 0, "y": int(random.choice(rotations)), "z": 0}
-                    agent_pos_rots[scene_type] = {
-                        "position": pos,
-                        "rotation": rot,
-                    }
-                
-                # used to make sure the positions of the objects
-                # are not always the same across the same scene.
-                start_kwargs = {
-                    "randomSeed": random.randint(0, int(1e7) - 1),
-                    "forceVisible": force_visible,
-                    "placeStationary": place_stationary,
-                }
-                target_kwargs = {
-                    "randomSeed": random.randint(0, int(1e7) - 1),
-                    "forceVisible": force_visible,
-                    "placeStationary": place_stationary,
-                }
-
-                starting_poses, objs_to_open = generate_one_task_order_given_initial_conditions(
-                    controller=controller,
-                    scene=target_scene,
-                    start_kwargs=start_kwargs,
-                    target_kwargs=target_kwargs,
-                    pickup_object_type=pickup_object_type,
-                    start_receptacle_type=start_receptacle_type,
-                    place_receptacle_type=target_receptacle_type,
-                    agent_pos=agent_pos_rots[target_scene_type]["position"],
-                    agent_rot=agent_pos_rots[target_scene_type]["rotation"],
-                )
-                if starting_poses is None:
+                assert env.all_rooms_reachable()[0]
+        except:
+            get_logger().info(
+                f"{episode_seed_string}: Inconsistency or room unreachability when reloading task spec."
+            )
+            continue
+    
+        ips, gps, cps = env.poses
+        pose_diffs = cast(
+            List[Dict[str, Any]], env.compare_poses(goal_pose=gps, cur_pose=cps)
+        )
+        reachable_positions = controller.step("GetReachablePositions").metadata[
+            "actionReturn"
+        ]
+        # cps == ips
+        failed = False
+        for gp, cp, pd in zip(gps, cps, pose_diffs):
+            if pd["iou"] is not None and pd["iou"] < IOU_THRESHOLD:
+                if gp["type"] != pick and gp["type"] != recep:
+                    failed = True
                     print(
-                        f"Skipping {target_scene}, {agent_pos_rots[target_scene_type]['position']}, {int(agent_pos_rots[target_scene_type]['rotation']['y'])} {pickup_object_type}, {start_receptacle_type}, {target_receptacle_type}."
+                        f"{episode_seed_string}: Moved object ({gp['type']}) not pick [{pick}] nor recep [{recep}]."
                     )
-                    continue
+                    break
                 
-                task_spec_dict = {
-                    "agent_positions": {
-                        scene_type: agent_pos_rots[scene_type]['position']
-                        for scene_type in SCENE_TYPE_TO_SCENES
-                    },
-                    "agent_rotations": {
-                        scene_type: int(agent_pos_rots[scene_type]['rotation']['y'])
-                        for scene_type in SCENE_TYPE_TO_SCENES
-                    },
-                    "scene_index": i,
-                    "start_scene": scene_from_type_idx(start_scene_type, i),
-                    "target_scene": target_scene,
-                    "pickup_object": pickup_object_type,
-                    "start_receptacle": start_receptacle_type,
-                    "place_receptacle": target_receptacle_type,
-                    "starting_poses": starting_poses,
-                    "objs_to_open": objs_to_open,
-                }
-                env.reset(task_spec=HomeServiceTaskSpec(**task_spec_dict), scene_type=target_scene_type)
+            if gp["broken"] or cp["broken"]:
+                failed = True
+                print(f"{episode_seed_string}: Broken object")
+                break
 
-                reachable_positions = env.controller.step(
-                    "GetReachablePositions"
-                ).metadata["actionReturn"]
+            pose_diff_energy = env.pose_difference_energy(goal_pose=gp, cur_pose=cp)
 
-                # check whether pickup object is interactable
+            if pose_diff_energy != 0:
+                obj_name = gp["objectId"]
+
+                # Ensure that objects to rearrange are visible from somewhere
                 interactable_poses = env.controller.step(
                     "GetInteractablePoses",
-                    objectId=next(
-                        o["objectId"]
-                        for o in env.controller.last_event.metadata["objects"]
-                        if o["objectType"] == pickup_object_type
-                    ),
+                    objectId=cp["objectId"],
                     positions=reachable_positions,
                 ).metadata["actionReturn"]
                 if interactable_poses is None or len(interactable_poses) == 0:
-                    continue
-                
-                # check whether place target is interactable
-                if target_receptacle_type != "User":
-                    if OBJECT_TYPES_WITH_PROPERTIES[target_receptacle_type]["openable"]:
-                        obj = next(
-                            obj
-                            for obj in objs_to_open
-                            if obj["name"].split("_")[0] == target_receptacle_type
-                        )
-                    else:
-                        obj = next(
-                            obj
-                            for obj in env.controller.last_event.metadata['objects']
-                            if obj['objectType'] == target_receptacle_type
-                        )
-                    interactable_poses = env.controller.step(
-                        "GetInteractablePoses",
-                        objectId=obj["objectId"],
-                        positions=reachable_positions,
-                    ).metadata["actionReturn"]
-                    if interactable_poses is None or len(interactable_poses) == 0:
-                        continue
-                
-                out[task_key].append(task_spec_dict)
-    return out
+                    print(
+                        f"{episode_seed_string}: {obj_name} is not visible despite needing to be rearranged."
+                    )
 
-def rearrangement_datagen_worker(
-    input_queue: mp.Queue,
-    output_queue: mp.Queue,
-):
-    env = HomeServiceTHOREnvironment(
-        force_cache_reset=True, controller_kwargs={"commit_id": THOR_COMMIT_ID}
-    )
+                    failed = True
+                    break
+        
+        if failed:
+            continue
 
-    while True:
-        try:
-            single_task_order, stage, scene_inds, seed = input_queue.get(timeout=2)
-            key = (
-                f'Pick_{single_task_order["pickupObjectTypes"][0]}_On_{single_task_order["startReceptacleType"]}_And_Place_{single_task_order["targetReceptacleType"]}'
-                if single_task_order["targetReceptacleType"] != "User" else
-                f'Bring_Me_{single_task_order["pickupObjectTypes"][0]}_On_{single_task_order["startReceptacleType"]}'
-            )
-        except queue.Empty:
-            break
-        data = generate_task_specs_for_task_orders(
-            stage_seed=seed,
-            task_orders=[single_task_order],
-            scene_inds=scene_inds,
-            env=env,
+        task_spec_dict["pose_diff_energy"] = float(
+            env.pose_difference_energy(goal_pose=gps, cur_pose=cps).sum()
         )
-        output_queue.put((key, stage, data[key]))
+
+        if task_spec_dict["pose_diff_energy"] == 0.0:
+            print(f"Not moved...")
+            continue
+    
+        print(f"{episode_seed_string} SUCCESS")
+        return task_spec_dict
 
 
-if __name__ == "__main__":
+def find_scene_to_limits_for_task(
+    stage_seed: int,
+    scene: str,
+    env: HomeServiceEnvironment,
+    stage: str,
+    task: str,
+    house_count: int,
+    force_visible: bool = True,
+    place_stationary: bool = False,
+    rotation_increment: int = 90,
+    allow_moveable_in_goal_randomization: bool = False,
+    # object_types_to_not_move=,
+    # obj_name_to_avoid_positions=obj_name_to_avoid_positions,
+) -> Optional[Any]:
+    if 360 % rotation_increment != 0:
+        raise ValueError("Rotation increment must be a factor of 360")
+
+    scene_to_limits = {}
+    if stage == "debug":
+        stage = task.split("_")[0]
+
+    shuffled_scenes = copy.deepcopy(STAGE_TO_VALID_TASK_TO_SCENES[stage][task])
+
+    st = random.getstate()
+    random.seed(stage_seed)
+    random.shuffle(shuffled_scenes)
+    random.setstate(st)
+
+    for scene in shuffled_scenes:
+        print(f"Task {stage} {task} for {scene} limits")
+
+        if env.num_rooms(scene) != 4:
+            print(f"{scene} has {env.num_rooms(scene)} rooms. Skipping.")
+            continue
+    
+        # House loaded in get_scene_limits_for_task
+        limits = get_scene_limits_for_task(
+            env,
+            task,
+            scene,
+            # object_types_to_not_move=object_types_to_not_move,
+        )
+        if limits is None:
+            print(f"Cannot use scene {scene} for task {task}.")
+            continue
+        
+        else:
+            scene_to_limits[scene] = limits
+            if len(scene_to_limits) == house_count:
+                break
+    
+    if len(scene_to_limits) < house_count:
+        print(f"Task {stage} {task} not enough num_scenes. Skipping Task.")
+        return None
+
+    return scene_to_limits
+
+
+class HomeServiceDatagenWorker(Worker):
+
+    def create_env(self, **env_args: Any) -> Optional[Any]:
+        env = HomeServiceEnvironment(
+            force_cache_reset=True,
+            controller_kwargs={
+                "scene": "Procedural",
+                "x_display": f"0.{self.gpu}" if self.gpu is not None else None,
+                "platform": CloudRendering,
+            },
+        )
+
+        return env
+
+    def work(self, task_type: Optional[str], task_info: Dict[str, Any]) -> Optional[Any]:
+        if task_type == "home_service":
+            (
+                scene,
+                seed,
+                stage,
+                task,
+                house_i,
+                scene_i,
+                limits,
+                house_count,
+                scene_count,
+                # obj_name_to_avoid_positions,
+            ) = (
+                task_info["scene"],
+                task_info["seed"],
+                task_info["stage"],
+                task_info["task"],
+                task_info["house_i"],
+                task_info["scene_i"],
+                task_info["limits"],
+                task_info["house_count"],
+                task_info["scene_count"],
+                # task_info["obj_name_to_avoid_positions"],
+            )
+
+            mode, idx = tuple(scene.split("_"))
+            self.env._houses.mode(mode)
+
+            data = generate_home_service_episode_for_task(
+                stage_seed=seed,
+                scene=scene,
+                env=self.env,
+                task=task,
+                stage=stage,
+                house_count=house_count,
+                scene_count=scene_count,
+                house_i=house_i,
+                scene_i=scene_i,
+                limits=limits
+                # object_types_to_not_move=,
+                # obj_name_to_avoid_positions=obj_name_to_avoid_positions,
+            )
+
+            return data
+
+        elif task_type == "find_limits":
+            (
+                scene,
+                seed,
+                stage,
+                task,
+                house_count,
+                # scene_i,
+                # obj_name_to_avoid_positions,
+            ) = (
+                task_info["scene"],
+                task_info["seed"],
+                task_info["stage"],
+                task_info["task"],
+                task_info["house_count"],
+                # task_info["scene_i"],
+                # task_info["obj_name_to_avoid_positions"],
+            )
+
+            mode = task.split("_")[0]
+            self.env._houses.mode(mode)
+
+            data = find_scene_to_limits_for_task(
+                stage_seed=seed,
+                scene=scene,
+                env=self.env,
+                stage=stage,
+                task=task,
+                house_count=house_count,
+                # house_i=house_i,
+                # scene_i=scene_i,
+                # object_types_to_not_move=,
+                # obj_name_to_avoid_positions=obj_name_to_avoid_positions,
+            )
+
+            return data
+
+
+def args_parsing():
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", "-d", action="store_true", default=False)
     parser.add_argument("--train_unseen", "-t", action="store_true", default=False)
-    args = parser.parse_args()
+    parser.add_argument("--mode", "-m", default="train")
+    return parser.parse_args()
 
-    nprocesses = max(mp.cpu_count() // 2, 1)
-    # nprocesses = 1
 
-    stage_seeds = get_random_seeds()
+class HomeServiceDatagenManager(Manager):
 
-    os.makedirs(STARTER_HOME_SERVICE_DATA_DIR, exist_ok=True)
+    def work(
+        self,
+        task_type: Optional[str],
+        task_info: Dict[str, Any],
+        success: bool,
+        result: Any
+    ) -> None:
+        if task_type is None:
+            args = args_parsing()
 
-    stage_to_task_key_to_task_orders = {stage: {} for stage in ("train_seen", "train_unseen", "test_seen", "test_unseen")}
-    for stage in ("train_seen", "train_unseen", "test_seen", "test_unseen"):
-        path = os.path.join(STARTER_HOME_SERVICE_DATA_DIR, f"{stage}.json")
-        if os.path.exists(path):
-            with open(path, "r") as f:
-                stage_to_task_key_to_task_orders[stage] = json.load(f)
-    
-    send_queue = mp.Queue()
-    num_task_key_to_run = 0
-    for task_order in TASK_ORDERS:
-        pickup_object_types = task_order["pickupObjectTypes"]
-        for pickup_object_type in pickup_object_types:
-            single_task_order = task_order.copy()
-            single_task_order["pickupObjectTypes"] = [pickup_object_type]
-            task_key = (
-                f'Pick_{pickup_object_type}_On_{single_task_order["startReceptacleType"]}_And_Place_{single_task_order["targetReceptacleType"]}'
-                if single_task_order["targetReceptacleType"] != "User" else
-                f'Bring_Me_{pickup_object_type}_On_{single_task_order["startReceptacleType"]}'
+            stage_seeds = get_random_seeds()
+
+            # max_scene_count: number of houses for each task type
+            self.house_count = STAGE_TO_DEST_NUM_SCENES[args.mode]
+            if args.mode == "train":
+                self.scene_count = 5
+            elif args.mode in ["val", "test"]:
+                self.scene_count = 2
+
+            # stage_to_tasks = {
+            #     stage: [
+            #         f"{stage}_pick_and_place_{pick}_{recep}"
+            #         for pick, recep in PICKUPABLE_RECEPTACLE_PAIRS
+            #         if pick not in (PICKUP_OBJECTS_FOR_TEST if 'train' in stage else [])
+            #     ]
+            #     for stage in [args.mode]
+            # }
+            stage_to_tasks = {
+                stage: STAGE_TO_VALID_TASKS[stage]
+                for stage in [args.mode]
+            }
+
+            # scene_to_obj_name_to_avoid_positions = None
+            if args.debug:
+                partition = "train" if args.mode == "train" else "valid"
+                idxs = [0, 1, 2]
+                self.house_count = 3
+                self.scene_count = 2
+                stage_to_tasks = {
+                    "debug": [
+                        stage_to_tasks[partition][idx]
+                        for idx in idxs
+                    ]
+                }
+
+            os.makedirs(STARTER_HOME_SERVICE_DATA_DIR, exist_ok=True)
+
+            self.last_save_time = {stage: time.time() for stage in stage_to_tasks}
+
+            self.stage_to_task_to_task_specs = {
+                stage: {} for stage in stage_to_tasks
+            }
+            for stage in stage_to_tasks:
+                path = os.path.join(STARTER_HOME_SERVICE_DATA_DIR, f"{stage}.json")
+                if os.path.exists(path):
+                    with open(path, "r") as f:
+                        self.stage_to_task_to_task_specs[stage] = json.load(f)
+            
+            for stage in stage_to_tasks:
+                for task in stage_to_tasks[stage]:
+                    if task not in self.stage_to_task_to_task_specs[stage]:
+                        self.stage_to_task_to_task_specs[stage][task] = [
+                            [-1] * self.scene_count
+                        ] * self.house_count
+                        self.enqueue(
+                            task_type="find_limits",
+                            task_info=dict(
+                                scene="",
+                                stage=stage,
+                                task=task,
+                                seed=stage_seeds[stage],
+                                house_count=self.house_count,
+                                # scene_i=-1,
+                                # obj_name_to_avoid_positions=obj_name_to_avoid_positions,
+                            )
+                        )
+
+        elif task_type == "find_limits":
+            if result is not None:
+                for it, (scene, limits) in enumerate(result.items()):
+                    task_info["scene"] = scene
+                    task_info["limits"] = limits
+                    for scene_i in range(self.scene_count):
+                        if (
+                            self.stage_to_task_to_task_specs[task_info["stage"]][task_info["task"]][it][scene_i] == -1
+                        ):
+                            task_info["house_i"] = it
+                            task_info["scene_i"] = scene_i
+                            task_info["house_count"] = self.house_count
+                            task_info["scene_count"] = self.scene_count
+                            self.enqueue(
+                                task_type="home_service",
+                                task_info=copy.deepcopy(task_info)
+                            )
+            else:
+                # result is None, delete task from data
+                del self.stage_to_task_to_task_specs[task_info["stage"]][task_info["task"]]
+        
+        elif task_type == "home_service":
+            scene, stage, task, seed, house_i, scene_i = (
+                task_info["scene"],
+                task_info["stage"],
+                task_info["task"],
+                task_info["seed"],
+                task_info["house_i"],
+                task_info["scene_i"],
             )
-            for room_seen in ("seen", "unseen"):
-                if pickup_object_type in OBJECTS_FOR_TEST:
-                    stage = "test"
-                else:
-                    stage = "train"
-                stage = "_".join([stage, room_seen])
-                if room_seen == "seen":
-                    scene_inds = range(1, 21)
-                elif room_seen == "unseen":
-                    scene_inds = range(21, 31)
-                else:
-                    raise RuntimeError
 
-                if task_key not in stage_to_task_key_to_task_orders[stage]:
-                    num_task_key_to_run += 1
-                    send_queue.put((single_task_order, stage, scene_inds, stage_seeds[stage]))
+            task_to_task_specs = self.stage_to_task_to_task_specs[stage]
+            task_to_task_specs[task][house_i][scene_i] = result
 
-    receive_queue = mp.Queue()
-    processes = []
-    for i in range(nprocesses):
-        p = mp.Process(
-            target=rearrangement_datagen_worker,
-            kwargs=dict(
-                input_queue=send_queue,
-                output_queue=receive_queue,
-            ),
-        )
-        p.start()
-        processes.append(p)
-        time.sleep(0.5)
+            num_missing = len(
+                [
+                    ep
+                    for houses in task_to_task_specs[task]
+                    for ep in houses
+                    if ep == -1
+                ]
+            )
 
-    num_received = 0
-    while num_task_key_to_run > num_received:
-        try:
-            task_key, stage, data = receive_queue.get(timeout=1)
-            num_received += 1
-        except queue.Empty:
-            continue
+            if num_missing == 0:
+                get_logger().info(
+                    f"{self.info_header}: Completed {stage} {task}"
+                )
 
-        print(f"Saving {task_key}")
+            for stage in self.last_save_time:
+                if self.all_work_done or (
+                    time.time() - self.last_save_time[stage] > 30 * 60
+                ):
+                    get_logger().info(self.info_header + f": Saving {stage}")
 
-        task_key_to_task_orders = stage_to_task_key_to_task_orders[stage]
-        if task_key not in task_key_to_task_orders:
-            task_key_to_task_orders[task_key] = []
+                    with open(
+                        os.path.join(STARTER_HOME_SERVICE_DATA_DIR, f"{stage}.json"), "w"
+                    ) as f:
+                        json.dump(self.stage_to_task_to_task_specs[stage], f)
 
-        task_key_to_task_orders[task_key].extend(data)
+                    compress_pickle.dump(
+                        obj=self.stage_to_task_to_task_specs[stage],
+                        path=os.path.join(STARTER_HOME_SERVICE_DATA_DIR, f"{stage}.pkl.gz"),
+                        # pickler_kwargs={
+                        #     "protocol": 4,
+                        # },  # Backwards compatible with python 3.6
+                    )
 
-        with open(os.path.join(STARTER_HOME_SERVICE_DATA_DIR, f"{stage}.json"), "w") as f:
-            json.dump(task_key_to_task_orders, f)
+                    self.last_save_time[stage] = time.time()
 
-        compress_pickle.dump(
-            obj=task_key_to_task_orders,
-            path=os.path.join(STARTER_HOME_SERVICE_DATA_DIR, f"{stage}.pkl.gz"),
-            protocol=pickle.HIGHEST_PROTOCOL,
-        )
+        else:
+            raise ValueError(f"Unknown task type {task_type}")
 
-    for p in processes:
-        try:
-            p.join(timeout=1)
-        except:
-            pass
+if __name__ == "__main__":
+    args = args_parsing()
+
+    print(f"Using args {args}")
+
+    assert args.mode in ["train", "val", "test"]
+    if args.train_unseen:
+        assert args.mode == "train"
+
+    HomeServiceDatagenManager(
+        worker_class=HomeServiceDatagenWorker,
+        env_args={},
+        workers=max((2 * mp.cpu_count()) // 4, 1)
+        if platform.system() == "Linux" and not args.debug
+        else 1,
+        ngpus=torch.cuda.device_count(),
+        die_on_exception=False,
+        verbose=True,
+        debugging=args.debug,
+        sleep_between_workers=1.0,
+    )
