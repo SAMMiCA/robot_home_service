@@ -950,6 +950,7 @@ class HomeServiceDatagenWorker(Worker):
                 "scene": "Procedural",
                 "x_display": f"0.{self.gpu}" if self.gpu is not None else None,
                 "platform": CloudRendering,
+                "gpu_device": self.gpu,
             },
         )
 
@@ -1219,7 +1220,7 @@ if __name__ == "__main__":
     HomeServiceDatagenManager(
         worker_class=HomeServiceDatagenWorker,
         env_args={},
-        workers=max((3 * mp.cpu_count()) // 4, 1)
+        workers=max((2 * mp.cpu_count()) // 4, 1)
         if platform.system() == "Linux" and not args.debug
         else 1,
         ngpus=torch.cuda.device_count(),

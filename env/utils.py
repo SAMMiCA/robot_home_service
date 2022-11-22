@@ -673,7 +673,7 @@ class Houses:
         self, revision="main", valid_houses_file=None,
     ):
         if valid_houses_file is None:
-            self._data = prior.load_dataset("procthor-10k", revision=revision)
+            self._data = prior.load_dataset("procthor-10k", revision=revision, offline=True)
             self._mode = "train"
         else:
             get_logger().info(f"Using valid_houses_file {valid_houses_file}")
