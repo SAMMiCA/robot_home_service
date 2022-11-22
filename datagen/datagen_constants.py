@@ -76,159 +76,179 @@ GOOD_4_ROOM_HOUSES = {
     ],
 }
 
-METADATA_DIR = os.path.join(STARTER_HOME_SERVICE_DATA_DIR, "metadata")
-HOME_SERVICE_HOUSES_METADATA = {
-    stage: {
-        cat: compress_pickle.load(
-            os.path.join(METADATA_DIR, f"{stage}_metadata_{cat}.pkl.gz")
-        )
-        for cat in ("scenes", "pickupables", "receptacles")
-    }
-    for stage in ("train", "val", "test")
-}
-
-STAGE_TO_TASKS = {
-    stage: [
-        f"{stage}_pick_and_place_{pick}_{recep}"
-        for pick, recep in PICKUPABLE_RECEPTACLE_PAIRS
-        if (
-            pick not in (PICKUP_OBJECTS_FOR_TEST if 'train' in stage else [])
-            and pick in HOME_SERVICE_HOUSES_METADATA[stage]["pickupables"]
-            and recep in HOME_SERVICE_HOUSES_METADATA[stage]["receptacles"]
-        )
-    ]
-    for stage in ("train", "val", "test")
-}
-
-STAGE_TO_TASK_TO_SCENES = {
-    stage: {} for stage in STAGE_TO_TASKS
-}
-for stage in STAGE_TO_TASKS:
-    for task in STAGE_TO_TASKS[stage]:
-        pick, recep = task.split("_")[-2:]
-        STAGE_TO_TASK_TO_SCENES[stage][task] = [
-            scene
-            for scene in HOME_SERVICE_HOUSES_METADATA[stage]["scenes"]
-            if (
-                scene in HOME_SERVICE_HOUSES_METADATA[stage]["pickupables"][pick]
-                and scene in HOME_SERVICE_HOUSES_METADATA[stage]["receptacles"][recep]
-            )
-        ]
-
-STAGE_TO_TASK_TO_NUM_SCENES = {
-    stage: {
-        task: len(STAGE_TO_TASK_TO_SCENES[stage][task])
-        for task in tasks
-    }
-    for stage, tasks in STAGE_TO_TASKS.items()
-}
-
 STAGE_TO_MIN_SCENES = {
-    "train": 100,
+    "train": 50,
     "val": 10,
     "test": 10,
 }
-
-STAGE_TO_VALID_TASKS = {
-    stage: [task for task in tasks if STAGE_TO_TASK_TO_NUM_SCENES[stage][task] >= STAGE_TO_MIN_SCENES[stage]]
-    for stage, tasks in STAGE_TO_TASKS.items()
-}
-# train: 363, val: 419, test:442
-
-STAGE_TO_VALID_TASK_TO_SCENES = {
-    stage: {
-        task: STAGE_TO_TASK_TO_SCENES[stage][task]
-        for task in STAGE_TO_VALID_TASKS[stage]
-    }
-    for stage in STAGE_TO_TASKS
-}
-
-STAGE_TO_VALID_TASK_TO_NUM_SCENES = {
-    stage: {
-        task: len(STAGE_TO_VALID_TASK_TO_SCENES[stage][task])
-        for task in STAGE_TO_VALID_TASK_TO_SCENES[stage]
-    }
-    for stage in STAGE_TO_VALID_TASK_TO_SCENES
-}
-
-STAGE_TO_VALID_TASK_TO_NUM_SCENES_SORTED = {
-    stage: dict(sorted(STAGE_TO_VALID_TASK_TO_NUM_SCENES[stage].items(), key=lambda item: item[1]))
-    for stage in STAGE_TO_VALID_TASK_TO_SCENES
-}
-
-STAGE_TO_SCENE_TO_TASKS = {
-    stage: {} for stage in STAGE_TO_TASKS
-}
-for stage in STAGE_TO_TASKS:
-    for task, scenes in STAGE_TO_TASK_TO_SCENES[stage].items():
-        for scene in scenes:
-            if scene not in STAGE_TO_SCENE_TO_TASKS[stage]:
-                STAGE_TO_SCENE_TO_TASKS[stage][scene] = []
-            STAGE_TO_SCENE_TO_TASKS[stage][scene].append(task)
-STAGE_TO_SCENE_TO_NUM_TASKS = {
-    stage: {
-        scene: len(tasks)
-        for scene, tasks in STAGE_TO_SCENE_TO_TASKS[stage].items()
-    }
-    for stage in STAGE_TO_TASKS
-}
-
-STAGE_TO_SCENE_TO_VALID_TASKS = {
-    stage: {
-        scene: [
-            task
-            for task in STAGE_TO_SCENE_TO_TASKS[stage][scene]
-            if task in STAGE_TO_VALID_TASKS[stage]
-        ]
-        for scene in STAGE_TO_SCENE_TO_TASKS[stage]
-    }
-    for stage in STAGE_TO_SCENE_TO_TASKS
-}
-STAGE_TO_SCENE_TO_NUM_VALID_TASKS = {
-    stage: {
-        scene: len(tasks)
-        for scene, tasks in STAGE_TO_SCENE_TO_VALID_TASKS[stage].items()
-    }
-    for stage in STAGE_TO_TASKS
-}
-
-STAGE_TO_SCENE_TO_NUM_VALID_TASKS_SORTED = {
-    stage: dict(sorted(STAGE_TO_SCENE_TO_NUM_VALID_TASKS[stage].items(), key=lambda item: item[1], reverse=True))
-    for stage in STAGE_TO_SCENE_TO_NUM_VALID_TASKS
-}
-
-STAGE_TO_MIN_SCENES_COVERING_ALL_VALID_TASKS = {}
-for stage in STAGE_TO_VALID_TASK_TO_NUM_SCENES_SORTED:
-    scene_set = set()
-    task_set = set()
-    all_tasks = False
-    for task in STAGE_TO_VALID_TASK_TO_NUM_SCENES_SORTED[stage]:
-        for scene in STAGE_TO_VALID_TASK_TO_SCENES[stage][task]:
-            if scene not in scene_set:
-                scene_set.add(scene)
-            
-                for t in STAGE_TO_SCENE_TO_VALID_TASKS[stage][scene]:
-                    if t not in task_set:
-                        task_set.add(t)
-                    if len(task_set) == len(STAGE_TO_VALID_TASKS[stage]):
-                        all_tasks = True
-                        break
-            if all_tasks:
-                break
-        if all_tasks:
-            break
-    STAGE_TO_MIN_SCENES_COVERING_ALL_VALID_TASKS[stage] = scene_set
-
-STAGE_TO_NUM_MIN_SCENES_COVERING_ALL_VALID_TASKS = {
-    stage: len(STAGE_TO_MIN_SCENES_COVERING_ALL_VALID_TASKS[stage])
-    for stage in STAGE_TO_TASKS
-}
-# train: 20, val: 19, test:18
 
 STAGE_TO_DEST_NUM_SCENES = {
-    "train": 100,
-    "val": 10,
-    "test": 10,
+    "train": 20,
+    "val": 5,
+    "test": 5,
 }
 
-# STAGE_TO_SCENES_COVERING_ALL_VALID_TASKS
+# METADATA_DIR = os.path.join(STARTER_HOME_SERVICE_DATA_DIR, "metadata")
+# all_ready = True
+# for stage in ("train", "val", "test"):
+#     for cat in ("scenes", "pickupables", "receptacles"):
+#         if not os.path.exists(
+#             os.path.join(METADATA_DIR, f"{stage}_metadata_{cat}.pkl.gz")
+#         ):
+#             all_ready = False
+#             break
+#     if not all_ready:
+#         break
+
+# if all_ready:
+#     HOME_SERVICE_HOUSES_METADATA = {
+#         stage: {
+#             cat: compress_pickle.load(
+#                 os.path.join(METADATA_DIR, f"{stage}_metadata_{cat}.pkl.gz")
+#             )
+#             for cat in ("scenes", "pickupables", "receptacles")
+#         }
+#         for stage in ("train", "val", "test")
+#     }
+
+#     STAGE_TO_TASKS = {
+#         stage: [
+#             f"{stage}_pick_and_place_{pick}_{recep}"
+#             for pick, recep in PICKUPABLE_RECEPTACLE_PAIRS
+#             if (
+#                 pick not in (PICKUP_OBJECTS_FOR_TEST if 'train' in stage else [])
+#                 and pick in HOME_SERVICE_HOUSES_METADATA[stage]["pickupables"]
+#                 and recep in HOME_SERVICE_HOUSES_METADATA[stage]["receptacles"]
+#             )
+#         ]
+#         for stage in ("train", "val", "test")
+#     }
+
+#     STAGE_TO_TASK_TO_SCENES = {
+#         stage: {} for stage in STAGE_TO_TASKS
+#     }
+#     for stage in STAGE_TO_TASKS:
+#         for task in STAGE_TO_TASKS[stage]:
+#             pick, recep = task.split("_")[-2:]
+#             STAGE_TO_TASK_TO_SCENES[stage][task] = [
+#                 scene
+#                 for scene in HOME_SERVICE_HOUSES_METADATA[stage]["scenes"]
+#                 if (
+#                     scene in HOME_SERVICE_HOUSES_METADATA[stage]["pickupables"][pick]
+#                     and scene in HOME_SERVICE_HOUSES_METADATA[stage]["receptacles"][recep]
+#                 )
+#             ]
+
+#     STAGE_TO_TASK_TO_NUM_SCENES = {
+#         stage: {
+#             task: len(STAGE_TO_TASK_TO_SCENES[stage][task])
+#             for task in tasks
+#         }
+#         for stage, tasks in STAGE_TO_TASKS.items()
+#     }
+
+    
+
+#     STAGE_TO_VALID_TASKS = {
+#         stage: [task for task in tasks if STAGE_TO_TASK_TO_NUM_SCENES[stage][task] >= STAGE_TO_MIN_SCENES[stage]]
+#         for stage, tasks in STAGE_TO_TASKS.items()
+#     }
+#     # train: 363, val: 419, test:442
+
+#     STAGE_TO_VALID_TASK_TO_SCENES = {
+#         stage: {
+#             task: STAGE_TO_TASK_TO_SCENES[stage][task]
+#             for task in STAGE_TO_VALID_TASKS[stage]
+#         }
+#         for stage in STAGE_TO_TASKS
+#     }
+
+#     STAGE_TO_VALID_TASK_TO_NUM_SCENES = {
+#         stage: {
+#             task: len(STAGE_TO_VALID_TASK_TO_SCENES[stage][task])
+#             for task in STAGE_TO_VALID_TASK_TO_SCENES[stage]
+#         }
+#         for stage in STAGE_TO_VALID_TASK_TO_SCENES
+#     }
+
+#     STAGE_TO_VALID_TASK_TO_NUM_SCENES_SORTED = {
+#         stage: dict(sorted(STAGE_TO_VALID_TASK_TO_NUM_SCENES[stage].items(), key=lambda item: item[1]))
+#         for stage in STAGE_TO_VALID_TASK_TO_SCENES
+#     }
+
+#     STAGE_TO_SCENE_TO_TASKS = {
+#         stage: {} for stage in STAGE_TO_TASKS
+#     }
+#     for stage in STAGE_TO_TASKS:
+#         for task, scenes in STAGE_TO_TASK_TO_SCENES[stage].items():
+#             for scene in scenes:
+#                 if scene not in STAGE_TO_SCENE_TO_TASKS[stage]:
+#                     STAGE_TO_SCENE_TO_TASKS[stage][scene] = []
+#                 STAGE_TO_SCENE_TO_TASKS[stage][scene].append(task)
+#     STAGE_TO_SCENE_TO_NUM_TASKS = {
+#         stage: {
+#             scene: len(tasks)
+#             for scene, tasks in STAGE_TO_SCENE_TO_TASKS[stage].items()
+#         }
+#         for stage in STAGE_TO_TASKS
+#     }
+
+#     STAGE_TO_SCENE_TO_VALID_TASKS = {
+#         stage: {
+#             scene: [
+#                 task
+#                 for task in STAGE_TO_SCENE_TO_TASKS[stage][scene]
+#                 if task in STAGE_TO_VALID_TASKS[stage]
+#             ]
+#             for scene in STAGE_TO_SCENE_TO_TASKS[stage]
+#         }
+#         for stage in STAGE_TO_SCENE_TO_TASKS
+#     }
+#     STAGE_TO_SCENE_TO_NUM_VALID_TASKS = {
+#         stage: {
+#             scene: len(tasks)
+#             for scene, tasks in STAGE_TO_SCENE_TO_VALID_TASKS[stage].items()
+#         }
+#         for stage in STAGE_TO_TASKS
+#     }
+
+#     STAGE_TO_SCENE_TO_NUM_VALID_TASKS_SORTED = {
+#         stage: dict(sorted(STAGE_TO_SCENE_TO_NUM_VALID_TASKS[stage].items(), key=lambda item: item[1], reverse=True))
+#         for stage in STAGE_TO_SCENE_TO_NUM_VALID_TASKS
+#     }
+
+#     STAGE_TO_MIN_SCENES_COVERING_ALL_VALID_TASKS = {}
+#     for stage in STAGE_TO_VALID_TASK_TO_NUM_SCENES_SORTED:
+#         scene_set = set()
+#         task_set = set()
+#         all_tasks = False
+#         for task in STAGE_TO_VALID_TASK_TO_NUM_SCENES_SORTED[stage]:
+#             for scene in STAGE_TO_VALID_TASK_TO_SCENES[stage][task]:
+#                 if scene not in scene_set:
+#                     scene_set.add(scene)
+                
+#                     for t in STAGE_TO_SCENE_TO_VALID_TASKS[stage][scene]:
+#                         if t not in task_set:
+#                             task_set.add(t)
+#                         if len(task_set) == len(STAGE_TO_VALID_TASKS[stage]):
+#                             all_tasks = True
+#                             break
+#                 if all_tasks:
+#                     break
+#             if all_tasks:
+#                 break
+#         STAGE_TO_MIN_SCENES_COVERING_ALL_VALID_TASKS[stage] = scene_set
+
+#     STAGE_TO_NUM_MIN_SCENES_COVERING_ALL_VALID_TASKS = {
+#         stage: len(STAGE_TO_MIN_SCENES_COVERING_ALL_VALID_TASKS[stage])
+#         for stage in STAGE_TO_TASKS
+#     }
+#     # train: 20, val: 19, test:18
+
+#     STAGE_TO_DEST_NUM_SCENES = {
+#         "train": 100,
+#         "val": 10,
+#         "test": 10,
+#     }
+
+#     # STAGE_TO_SCENES_COVERING_ALL_VALID_TASKS

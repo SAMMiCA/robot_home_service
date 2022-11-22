@@ -34,7 +34,8 @@ dependencies:
   - pip:
     - "allenact>=0.5.1"
     - "allenact_plugins[ithor]>=0.5.1"
-    - "ai2thor>=4.2.0"
+    - --extra-index-url https://ai2thor-pypi.allenai.org
+    - ai2thor==0+391b3fae4d4cc026f1522e5acf60953560235971
     - numpy-quaternion
     - docformatter==1.3.1
     - "gym>=0.17.0,<0.20.0"
@@ -47,6 +48,8 @@ dependencies:
     - shapely
     - ffmpeg-python
     - h5py
+    - prior
+    - procthor
     - "git+https://github.com/openai/CLIP.git"
 
 

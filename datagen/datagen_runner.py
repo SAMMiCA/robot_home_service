@@ -38,7 +38,8 @@ from datagen.datagen_utils import (
     mapping_counts,
     open_objs
 )
-from datagen.datagen_constants import NUM_TEST_TASKS, NUM_TRAIN_TASKS, NUM_VAL_TASKS, PICKUPABLE_RECEPTACLE_PAIRS, PICKUP_OBJECTS_FOR_TEST, GOOD_4_ROOM_HOUSES, STAGE_TO_DEST_NUM_SCENES, STAGE_TO_VALID_TASK_TO_SCENES, STAGE_TO_VALID_TASKS
+from datagen.datagen_constants import STAGE_TO_DEST_NUM_SCENES
+from datagen.utils.metadata_utils import sort_scenes
 from env.constants import IOU_THRESHOLD, OBJECT_TYPES_WITH_PROPERTIES, SCENE_TYPE_TO_SCENES, STARTER_HOME_SERVICE_DATA_DIR, THOR_COMMIT_ID
 from env.environment import (
     HomeServiceEnvironment,
@@ -387,13 +388,38 @@ def generate_one_home_service_given_initial_conditions(
         print(f"pickup target {pick} is spawned at not interactable position...")
         return None, None, None
 
-    controller.step(
-        "TeleportFull", horizon=0, standing=True, rotation=agent_rot, **agent_pos
-    )
-    if not controller.last_event.metadata["lastActionSuccess"]:
-        print(controller.last_event.metadata["errorMessage"])
-        return None, None, None
+    # controller.step(
+    #     "TeleportFull", horizon=0, standing=True, rotation=agent_rot, **agent_pos
+    # )
+    # if not controller.last_event.metadata["lastActionSuccess"]:
+    #     print(controller.last_event.metadata["errorMessage"])
+    #     return None, None, None
+    while len(pickup_interactable_poses) > 0:
+        controller.step(
+            "TeleportFull", **pickup_interactable_poses.pop()
+        )
+        if not controller.last_event.metadata["lastActionSuccess"]:
+            # Failed to Teleport
+            continue
+        
+        # Try to pick up object
+        controller.step(
+            "PickupObject",
+            objectId=pickup_target["objectId"],
+            forceAction=False,
+        )
+        if not controller.last_event.metadata["lastActionSuccess"]:
+            # Failed to pickup object
+            continue
+        else:
+            # Succeeded to pickup object
+            break
 
+    if not controller.last_event.metadata["lastActionSuccess"]:
+        print(f"Failed to teleport to the interactable poses for {pick}")
+        print(f"OR Failed to pickup object {pick}")
+        return None, None, None
+    
     # Ensure the recep target 
     objs_to_open = []
     if recep != "User":
@@ -411,6 +437,7 @@ def generate_one_home_service_given_initial_conditions(
         random.shuffle(recep_targets)
         random.setstate(st)
 
+        _success = False
         for recep_target in recep_targets:
             # Open recep_target
             if recep_target["openable"]:
@@ -433,69 +460,15 @@ def generate_one_home_service_given_initial_conditions(
                     print("Broken objects after opening")
                     return None, None, None
 
-            # Place the pickup target above the recep target to examine the possibility
-            controller.step(
-                "GetSpawnCoordinatesAboveReceptacle",
+            # get interactable poses for recep_target
+            recep_interactable_poses = controller.step(
+                "GetInteractablePoses",
                 objectId=recep_target["objectId"],
-                anywhere=True,
-            )
-            if not controller.last_event.metadata["lastActionSuccess"]:
-                print(controller.last_event.metadata["errorMessage"])
-                return None, None, None
-        
-            recep_pts = controller.last_event.metadata["actionReturn"][:]
-            random.shuffle(recep_pts)
-
-            while len(recep_pts) > 0:
-                controller.step(
-                    "PlaceObjectAtPoint",
-                    objectId=pickup_target["objectId"],
-                    position=recep_pts.pop(),
-                )
-                if not controller.last_event.metadata["lastActionSuccess"]:
-                    continue
-                else:
-                    objects_after_check_receps = copy.deepcopy(env.objects())
-                    pickupable_objects_after_check_receps = [
-                        obj
-                        for obj in objects_after_check_receps
-                        if obj["pickupable"]
-                    ]
-                    for o in pickupable_objects_after_check_receps:
-                        if o["isBroken"]:
-                            print(
-                                f"In scene {scene} object {o['objectId']} broke during setup."
-                            )
-                            return None, None, None
-                        if o["objectType"] == pick:
-                            pickup_target_after_check_recep = o
-                    
-                    o_pos = pickup_target_after_check_recep["position"]
-                    check_positions = [
-                        {
-                            "x": o_pos["x"] + 0.001 * x_off,
-                            "y": o_pos["y"] + 0.001 * y_off,
-                            "z": o_pos["z"] + 0.001 * z_off,
-                        }
-                        for x_off in [0, -1, 1]
-                        for y_off in [0, 1, 2]
-                        for z_off in [0, -1, 1]
-                    ]
-                    controller.step(
-                        "TeleportObject",
-                        objectId=pickup_target_after_check_recep["objectId"],
-                        positions=check_positions,
-                        rotation=pickup_target_after_check_recep["rotation"],
-                        makeUnbreakable=True,
-                    )
-                    if not controller.last_event.metadata["lastActionSuccess"]:
-                        continue
-
-                    break
-        
-            if not controller.last_event.metadata["lastActionSuccess"]:
-                print(f"No possible points to place the target {pick} on recep {recep_target['objectId']}.")
-                # reset openness of the current recep target
+                positions=rps,
+            ).metadata["actionReturn"]
+            if recep_interactable_poses is None or len(recep_interactable_poses) == 0:
+                print(f"recep target {recep} has no interactable poses...")
+                # Reset openness
                 if recep_target["openable"]:
                     controller.step(
                         "OpenObject",
@@ -504,12 +477,76 @@ def generate_one_home_service_given_initial_conditions(
                         forceAction=True,
                     )
                 continue
+
+            # Teleport to interactable pose
+            while len(recep_interactable_poses) > 0:
+                controller.step(
+                    "TeleportFull", **recep_interactable_poses.pop()
+                )
+                if not controller.last_event.metadata["lastActionSuccess"]:
+                    # Failed to Teleport
+                    continue
+                
+                # Try to put object on recep target
+                controller.step(
+                    "PutObject",
+                    objectId=recep_target["objectId"],
+                    forceAction=False,
+                )
+                if not controller.last_event.metadata["lastActionSuccess"]:
+                    # Failed to put object
+                    continue
+                else:
+                    # Succeeded to put object
+                    break
+            
+            if not controller.last_event.metadata["lastActionSuccess"]:
+                # Failed to put object at all interactable poses
+                continue
+
+            objects_after_check_receps = copy.deepcopy(env.objects())
+            pickupable_objects_after_check_receps = [
+                obj
+                for obj in objects_after_check_receps
+                if obj["pickupable"]
+            ]
+
+            for o in pickupable_objects_after_check_receps:
+                if o["isBroken"]:
+                    print(
+                        f"In scene {scene} object {o['objectId']} broke during setup."
+                    )
+                    return None, None, None
+                if o["objectType"] == pick:
+                    pickup_target_after_put = o
+
+            o_pos = pickup_target_after_put["position"]
+            check_positions = [
+                {
+                    "x": o_pos["x"] + 0.001 * x_off,
+                    "y": o_pos["y"] + 0.001 * y_off,
+                    "z": o_pos["z"] + 0.001 * z_off,
+                }
+                for x_off in [0, -1, 1]
+                for y_off in [0, 1, 2]
+                for z_off in [0, -1, 1]
+            ]
+            controller.step(
+                "TeleportObject",
+                objectId=pickup_target_after_put["objectId"],
+                positions=check_positions,
+                rotation=pickup_target_after_put["rotation"],
+                makeUnbreakable=True,
+            )
+            if not controller.last_event.metadata["lastActionSuccess"]:
+                # Failed to teleport objects on receptacle
+                continue
             else:
-                if recep_target["openable"]:
-                    objs_to_open.append(recep_target)
+                # Succeeded to teleport objects on receptacle
                 break
-        
+
         if not controller.last_event.metadata["lastActionSuccess"]:
+            # Failed to put on all receptacle targets
             print(f"No possible candidate for recep {recep} to place the target {pick} in the scene {scene}.")
             return None, None, None
 
@@ -787,6 +824,7 @@ def generate_home_service_episode_for_task(
             )
             continue
     
+        print(f"{episode_seed_string} task_spec_reset DONE.")
         ips, gps, cps = env.poses
         pose_diffs = cast(
             List[Dict[str, Any]], env.compare_poses(goal_pose=gps, cur_pose=cps)
@@ -850,6 +888,7 @@ def find_scene_to_limits_for_task(
     env: HomeServiceEnvironment,
     stage: str,
     task: str,
+    houses: Dict[str, Any],
     house_count: int,
     force_visible: bool = True,
     place_stationary: bool = False,
@@ -865,7 +904,7 @@ def find_scene_to_limits_for_task(
     if stage == "debug":
         stage = task.split("_")[0]
 
-    shuffled_scenes = copy.deepcopy(STAGE_TO_VALID_TASK_TO_SCENES[stage][task])
+    shuffled_scenes = copy.deepcopy(houses)
 
     st = random.getstate()
     random.seed(stage_seed)
@@ -968,6 +1007,7 @@ class HomeServiceDatagenWorker(Worker):
                 seed,
                 stage,
                 task,
+                houses,
                 house_count,
                 # scene_i,
                 # obj_name_to_avoid_positions,
@@ -976,6 +1016,7 @@ class HomeServiceDatagenWorker(Worker):
                 task_info["seed"],
                 task_info["stage"],
                 task_info["task"],
+                task_info["houses"],
                 task_info["house_count"],
                 # task_info["scene_i"],
                 # task_info["obj_name_to_avoid_positions"],
@@ -990,6 +1031,7 @@ class HomeServiceDatagenWorker(Worker):
                 env=self.env,
                 stage=stage,
                 task=task,
+                houses=houses,
                 house_count=house_count,
                 # house_i=house_i,
                 # scene_i=scene_i,
@@ -1029,16 +1071,13 @@ class HomeServiceDatagenManager(Manager):
             elif args.mode in ["val", "test"]:
                 self.scene_count = 2
 
-            # stage_to_tasks = {
-            #     stage: [
-            #         f"{stage}_pick_and_place_{pick}_{recep}"
-            #         for pick, recep in PICKUPABLE_RECEPTACLE_PAIRS
-            #         if pick not in (PICKUP_OBJECTS_FOR_TEST if 'train' in stage else [])
-            #     ]
-            #     for stage in [args.mode]
-            # }
+            (
+                stage_to_task_to_scenes_selected,
+                stage_to_scene_set_selected,
+            ) = sort_scenes()
+
             stage_to_tasks = {
-                stage: STAGE_TO_VALID_TASKS[stage]
+                stage: list(stage_to_task_to_scenes_selected[stage].keys())
                 for stage in [args.mode]
             }
 
@@ -1053,6 +1092,11 @@ class HomeServiceDatagenManager(Manager):
                         stage_to_tasks[partition][idx]
                         for idx in idxs
                     ]
+                }
+                stage_to_task_to_scenes_selected = {
+                    "debug": {
+                        **stage_to_task_to_scenes_selected[partition]
+                    }
                 }
 
             os.makedirs(STARTER_HOME_SERVICE_DATA_DIR, exist_ok=True)
@@ -1081,6 +1125,7 @@ class HomeServiceDatagenManager(Manager):
                                 stage=stage,
                                 task=task,
                                 seed=stage_seeds[stage],
+                                houses=list(stage_to_task_to_scenes_selected[stage][task]),
                                 house_count=self.house_count,
                                 # scene_i=-1,
                                 # obj_name_to_avoid_positions=obj_name_to_avoid_positions,
@@ -1117,6 +1162,9 @@ class HomeServiceDatagenManager(Manager):
                 task_info["house_i"],
                 task_info["scene_i"],
             )
+
+            result["scene"] = scene
+            result["stage"] = stage
 
             task_to_task_specs = self.stage_to_task_to_task_specs[stage]
             task_to_task_specs[task][house_i][scene_i] = result
@@ -1171,7 +1219,7 @@ if __name__ == "__main__":
     HomeServiceDatagenManager(
         worker_class=HomeServiceDatagenWorker,
         env_args={},
-        workers=max((2 * mp.cpu_count()) // 4, 1)
+        workers=max((3 * mp.cpu_count()) // 4, 1)
         if platform.system() == "Linux" and not args.debug
         else 1,
         ngpus=torch.cuda.device_count(),
