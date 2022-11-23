@@ -799,6 +799,8 @@ def generate_home_service_episode_for_task(
             continue
         
         task_spec_dict = {
+            "stage": stage,
+            "scene": scene,
             "pickup_object": pick,
             "target_receptacle": recep,
             "agent_position": pos,
@@ -812,7 +814,6 @@ def generate_home_service_episode_for_task(
             for _ in range(1):
                 env.reset(
                     task_spec=HomeServiceTaskSpec(
-                        scene=scene,
                         **task_spec_dict,
                     ),
                     raise_on_inconsistency=True,
@@ -1163,9 +1164,6 @@ class HomeServiceDatagenManager(Manager):
                 task_info["house_i"],
                 task_info["scene_i"],
             )
-
-            result["scene"] = scene
-            result["stage"] = stage
 
             task_to_task_specs = self.stage_to_task_to_task_specs[stage]
             task_to_task_specs[task][house_i][scene_i] = result
