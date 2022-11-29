@@ -54,8 +54,8 @@ NUM_TRAIN_SCENES = 10_000  # N episodes per scene
 NUM_VALID_SCENES = 1_000  # 10 episodes per scene
 NUM_TEST_SCENES = 1_000  # 1 episode per scene
 
-MAX_TRIES = 40
-EXTENDED_TRIES = 10
+MAX_TRIES = 10
+EXTENDED_TRIES = 2
 
 mp = mp.get_context("spawn")
 
@@ -438,6 +438,7 @@ def generate_one_home_service_given_initial_conditions(
         random.setstate(st)
 
         _success = False
+        pickupable_objects_after_check_receps = []
         for recep_target in recep_targets:
             # Open recep_target
             if recep_target["openable"]:
@@ -547,6 +548,13 @@ def generate_one_home_service_given_initial_conditions(
 
         if not controller.last_event.metadata["lastActionSuccess"]:
             # Failed to put on all receptacle targets
+            print(f"No possible candidate for recep {recep} to place the target {pick} in the scene {scene}.")
+            return None, None, None
+
+        if (
+            pickupable_objects_after_check_receps is None
+            or len(pickupable_objects_after_check_receps) == 0
+        ):
             print(f"No possible candidate for recep {recep} to place the target {pick} in the scene {scene}.")
             return None, None, None
 
@@ -801,6 +809,8 @@ def generate_home_service_episode_for_task(
         task_spec_dict = {
             "stage": stage,
             "scene": scene,
+            "house_i": house_i,
+            "scene_i": scene_i,
             "pickup_object": pick,
             "target_receptacle": recep,
             "agent_position": pos,
@@ -958,6 +968,8 @@ class HomeServiceDatagenWorker(Worker):
         return env
 
     def work(self, task_type: Optional[str], task_info: Dict[str, Any]) -> Optional[Any]:
+        # info_ = {k: v for k, v in task_info.items() if k != "limits"}
+        # print(f'[WORKER] GOT RESULT [{task_type}] for task_info [{info_}]')
         if task_type == "home_service":
             (
                 scene,
@@ -1061,6 +1073,8 @@ class HomeServiceDatagenManager(Manager):
         success: bool,
         result: Any
     ) -> None:
+        # info_ = {k: v for k, v in task_info.items() if k != "limits"}
+        # print(f'[MANAGER] GOT RESULT [{task_type}] for task_info [{info_}]')
         if task_type is None:
             args = args_parsing()
 
@@ -1086,7 +1100,7 @@ class HomeServiceDatagenManager(Manager):
             # scene_to_obj_name_to_avoid_positions = None
             if args.debug:
                 partition = "train" if args.mode == "train" else "valid"
-                idxs = [0, 1, 2]
+                idxs = [0, 1]
                 self.house_count = 3
                 self.scene_count = 2
                 stage_to_tasks = {
@@ -1108,18 +1122,30 @@ class HomeServiceDatagenManager(Manager):
             self.stage_to_task_to_task_specs = {
                 stage: {} for stage in stage_to_tasks
             }
+            self.stage_to_task_to_house_to_task_specs = {
+                stage: {} for stage in stage_to_tasks
+            }
             for stage in stage_to_tasks:
                 path = os.path.join(STARTER_HOME_SERVICE_DATA_DIR, f"{stage}.json")
                 if os.path.exists(path):
                     with open(path, "r") as f:
-                        self.stage_to_task_to_task_specs[stage] = json.load(f)
+                        self.stage_to_task_to_house_to_task_specs[stage] = json.load(f)
             
             for stage in stage_to_tasks:
                 for task in stage_to_tasks[stage]:
-                    if task not in self.stage_to_task_to_task_specs[stage]:
-                        self.stage_to_task_to_task_specs[stage][task] = [
-                            [-1] * self.scene_count
-                        ] * self.house_count
+                    if task not in self.stage_to_task_to_house_to_task_specs[stage]:
+                        self.stage_to_task_to_task_specs[stage][task] = [-1] * self.scene_count * self.house_count
+                        task_info = dict(
+                            scene="",
+                            stage=stage,
+                            task=task,
+                            seed=stage_seeds[stage],
+                            houses=list(stage_to_task_to_scenes_selected[stage][task]),
+                            house_count=self.house_count,
+                            # scene_i=-1,
+                            # obj_name_to_avoid_positions=obj_name_to_avoid_positions,
+                        )
+                        # print(f'[MANAGER] Enqueue at task_type ["find_limits"] with task_info [{task_info}]')
                         self.enqueue(
                             task_type="find_limits",
                             task_info=dict(
@@ -1141,12 +1167,14 @@ class HomeServiceDatagenManager(Manager):
                     task_info["limits"] = limits
                     for scene_i in range(self.scene_count):
                         if (
-                            self.stage_to_task_to_task_specs[task_info["stage"]][task_info["task"]][it][scene_i] == -1
+                            self.stage_to_task_to_task_specs[task_info["stage"]][task_info["task"]][it*self.scene_count+scene_i] == -1
                         ):
                             task_info["house_i"] = it
                             task_info["scene_i"] = scene_i
                             task_info["house_count"] = self.house_count
                             task_info["scene_count"] = self.scene_count
+                            # info_ = {k: v for k, v in task_info.items() if k != "limits"}
+                            # print(f'[MANAGER] Enqueue at task_type ["home_service"] with task_info [{info_}]')
                             self.enqueue(
                                 task_type="home_service",
                                 task_info=copy.deepcopy(task_info)
@@ -1156,31 +1184,45 @@ class HomeServiceDatagenManager(Manager):
                 del self.stage_to_task_to_task_specs[task_info["stage"]][task_info["task"]]
         
         elif task_type == "home_service":
-            scene, stage, task, seed, house_i, scene_i = (
+            scene, stage, task, seed, house_i, scene_i, house_count, scene_count = (
                 task_info["scene"],
                 task_info["stage"],
                 task_info["task"],
                 task_info["seed"],
                 task_info["house_i"],
                 task_info["scene_i"],
+                task_info["house_count"],
+                task_info["scene_count"]
             )
 
             task_to_task_specs = self.stage_to_task_to_task_specs[stage]
-            task_to_task_specs[task][house_i][scene_i] = result
-
+            task_to_task_specs[task][house_i*scene_count+scene_i] = copy.deepcopy(result)
             num_missing = len(
                 [
                     ep
-                    for houses in task_to_task_specs[task]
-                    for ep in houses
+                    for ep in task_to_task_specs[task]
                     if ep == -1
                 ]
             )
-
+            
             if num_missing == 0:
                 get_logger().info(
                     f"{self.info_header}: Completed {stage} {task}"
                 )
+                not_has_none = all(
+                    task_spec is not None
+                    for task_spec in task_to_task_specs[task]
+                )
+
+                if not_has_none:
+                    if task not in self.stage_to_task_to_house_to_task_specs[stage]:
+                        self.stage_to_task_to_house_to_task_specs[stage][task] = {}
+                    for task_spec in task_to_task_specs[task]:
+                        if task_spec["scene"] not in self.stage_to_task_to_house_to_task_specs[stage][task]:
+                            self.stage_to_task_to_house_to_task_specs[stage][task][task_spec["scene"]] = []
+                        self.stage_to_task_to_house_to_task_specs[stage][task][task_spec["scene"]].append(
+                            task_spec
+                        )
 
             for stage in self.last_save_time:
                 if self.all_work_done or (
@@ -1191,10 +1233,10 @@ class HomeServiceDatagenManager(Manager):
                     with open(
                         os.path.join(STARTER_HOME_SERVICE_DATA_DIR, f"{stage}.json"), "w"
                     ) as f:
-                        json.dump(self.stage_to_task_to_task_specs[stage], f)
+                        json.dump(self.stage_to_task_to_house_to_task_specs[stage], f)
 
                     compress_pickle.dump(
-                        obj=self.stage_to_task_to_task_specs[stage],
+                        obj=self.stage_to_task_to_house_to_task_specs[stage],
                         path=os.path.join(STARTER_HOME_SERVICE_DATA_DIR, f"{stage}.pkl.gz"),
                         # pickler_kwargs={
                         #     "protocol": 4,

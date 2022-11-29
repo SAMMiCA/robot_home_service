@@ -198,43 +198,6 @@ def find_object_by_type(objects: List[Dict], object_type: str):
 def scene_from_type_idx(scene_type: str, scene_idx: int):
     return SCENE_TYPE_TO_SCENES[scene_type][scene_idx - 1]
 
-def get_task_keys(stage: str) -> List[str]:
-    assert stage in {"train", "train_unseen", "val", "test", "all"}
-    stage = stage.split("_")[0]
-
-    task_keys = []
-    for task_order in TASK_ORDERS:
-        pickup_object_types = task_order["pickupObjectTypes"]
-        for pickup_object_type in pickup_object_types:
-            task_key = (
-                f'Pick_{pickup_object_type}_On_{task_order["startReceptacleType"]}_And_Place_{task_order["targetReceptacleType"]}'
-                if task_order["targetReceptacleType"] != "User" else
-                f'Bring_Me_{pickup_object_type}_On_{task_order["startReceptacleType"]}'
-            )
-            if stage == "test" and pickup_object_type in PICKUP_OBJECTS_FOR_TEST:
-                task_keys.append(task_key)
-            elif stage == "train" and pickup_object_type not in PICKUP_OBJECTS_FOR_TEST:
-                task_keys.append(task_key)
-            elif stage == "all":
-                task_keys.append(task_key)
-            
-    return task_keys
-
-def get_scene_inds(stage: str, seen: bool = None) -> List[int]:
-    assert stage in {"train", "val", "test", "train_unseen", "all"}
-    if stage in {"train", "test"}:
-        assert seen is not None
-    elif stage == "all":
-        return range(1, 31)
-    else:
-        seen = True if stage.split("_")[-1] == "seen" else False
-    
-    if seen:
-        return range(1, 21)
-    else:
-        return range(21, 31)
-
-
 def mapping_counts(din: Dict[Hashable, Sequence[Hashable]]) -> Dict[Hashable, int]:
     """One-to-many input mapping to one-to-length output mapping"""
     return {k: len(v) for k, v in din.items()}
