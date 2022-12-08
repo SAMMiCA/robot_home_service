@@ -40,7 +40,7 @@ from datagen.datagen_utils import (
 )
 from datagen.datagen_constants import STAGE_TO_DEST_NUM_SCENES
 from datagen.utils.metadata_utils import sort_scenes
-from env.constants import IOU_THRESHOLD, OBJECT_TYPES_WITH_PROPERTIES, SCENE_TYPE_TO_SCENES, STARTER_HOME_SERVICE_DATA_DIR, THOR_COMMIT_ID
+from env.constants import IOU_THRESHOLD, OBJECT_TYPES_WITH_PROPERTIES, STARTER_HOME_SERVICE_DATA_DIR, THOR_COMMIT_ID
 from env.environment import (
     HomeServiceEnvironment,
     HomeServiceTaskSpec,

@@ -15,19 +15,18 @@ from allenact.embodiedai.sensors.vision_sensors import DepthSensor
 from allenact.utils.misc_utils import prepare_locals_for_super
 from allenact_plugins.ithor_plugin.ithor_util import include_object_data, round_to_factor
 
-from env.constants import SCENE_TO_SCENE_TYPE, SCENE_TYPE_TO_LABEL, STEP_SIZE
-from env.environment import HomeServiceTHOREnvironment
+from env.constants import SCENE_TYPE_TO_LABEL, STEP_SIZE
+from env.environment import HomeServiceEnvironment
 from env.tasks import (
     HomeServiceTask,
-    AbstractHomeServiceTask,
 )
 
 
 class RGBHomeServiceSensor(
-    RGBSensor[HomeServiceTHOREnvironment, HomeServiceTask]
+    RGBSensor[HomeServiceEnvironment, HomeServiceTask]
 ):
     def frame_from_env(
-        self, env: HomeServiceTHOREnvironment, task: HomeServiceTask
+        self, env: HomeServiceEnvironment, task: HomeServiceTask
     ) -> np.ndarray:
         if isinstance(task, HomeServiceTask):
             return task.env.last_event.frame.copy()
@@ -38,10 +37,10 @@ class RGBHomeServiceSensor(
 
 
 class DepthHomeServiceSensor(
-    DepthSensor[HomeServiceTHOREnvironment, HomeServiceTask]
+    DepthSensor[HomeServiceEnvironment, HomeServiceTask]
 ):
     def frame_from_env(
-        self, env: HomeServiceTHOREnvironment, task: HomeServiceTask
+        self, env: HomeServiceEnvironment, task: HomeServiceTask
     ) -> np.ndarray:
         if isinstance(task, HomeServiceTask):
             return task.env.controller.last_event.depth_frame.copy()
@@ -63,7 +62,7 @@ class SubtaskType(enum.Enum):
 
 
 class SubtaskHomeServiceSensor(
-    Sensor[HomeServiceTHOREnvironment, HomeServiceTask]
+    Sensor[HomeServiceEnvironment, HomeServiceTask]
 ):
 
     def __init__(
@@ -108,8 +107,8 @@ class SubtaskHomeServiceSensor(
 
     def get_observation(
         self,
-        env: HomeServiceTHOREnvironment,
-        task: Optional[Task[HomeServiceTHOREnvironment]],
+        env: HomeServiceEnvironment,
+        task: Optional[Task[HomeServiceEnvironment]],
         *args: Any,
         **kwargs: Any,
     ) -> Any:
@@ -201,7 +200,7 @@ class SubtaskHomeServiceSensor(
 
 
 class RelativePositionChangeSensor(
-    Sensor[HomeServiceTHOREnvironment, HomeServiceTask]
+    Sensor[HomeServiceEnvironment, HomeServiceTask]
 ):
     def __init__(self, uuid: str = "rel_position_change", base: int = 90, **kwargs: Any):
         observation_space = gym.spaces.Dict(
@@ -256,8 +255,8 @@ class RelativePositionChangeSensor(
 
     def get_observation(
         self,
-        env: HomeServiceTHOREnvironment,
-        task: Optional[Task[HomeServiceTHOREnvironment]],
+        env: HomeServiceEnvironment,
+        task: Optional[Task[HomeServiceEnvironment]],
         *args: Any,
         **kwargs: Any,
     ) -> Any:
@@ -305,7 +304,7 @@ class RelativePositionChangeSensor(
 
 
 class InstanceSegmentationSensor(
-    Sensor[HomeServiceTHOREnvironment, HomeServiceTask]
+    Sensor[HomeServiceEnvironment, HomeServiceTask]
 ):
     def __init__(
         self,
@@ -324,8 +323,8 @@ class InstanceSegmentationSensor(
 
     def get_observation(
         self,
-        env: HomeServiceTHOREnvironment,
-        task: Optional[Task[HomeServiceTHOREnvironment]],
+        env: HomeServiceEnvironment,
+        task: Optional[Task[HomeServiceEnvironment]],
         *args: Any,
         **kwargs: Any,
     ) -> Any:
@@ -374,90 +373,4 @@ class InstanceSegmentationSensor(
             'inst_detected': inst_detected,
         }
 
-# class YolactObjectDetectionSensor(
-#     Sensor[HomeServiceTHOREnvironment, HomeServiceTask]
-# ):
-#     def __init__(
-#         self,
-#         ordered_object_types: Sequence[str] = None,
-#         uuid: str = "yolact",
-#         *args: Any,
-#         **kwargs: Any,
-#     ):
 
-#         self.ordered_object_types = list(ordered_object_types)
-#         assert self.ordered_object_types == sorted(self.ordered_object_types)
-        
-#         model_path = SavePath.from_str(kwargs["trained_model"])
-#         config = model_path.model_name + "_config"
-#         set_cfg(config)
-#         set_dataset(kwargs["dataset"])
-#         cfg.num_classes = len(cfg.dataset.class_names) + 1
-#         assert len(self.ordered_object_types) == cfg.num_classes - 1
-#         net = Yolact()
-#         net.load_weights(kwargs["trained_model"])
-#         net.eval()
-#         self.cuda = False
-#         if kwargs['cuda']:
-#             net = net.cuda()
-#             self.cuda = True
-
-#         net.detect.use_fast_nms = kwargs['fast_nms']
-#         net.detect.use_cross_class_nms = kwargs['cross_class_nms']
-#         # cfg.mask_proto_debug = kwargs['mask_proto_debug']
-#         self.net = net
-        
-#         self.object_type_to_idn = {ot: i for i, ot in enumerate(self.ordered_object_types)}
-#         self.idn_to_object_type = {i: ot for i, ot in enumerate(self.ordered_object_types)}
-
-#         observation_space = gym.spaces.Space()
-#         super().__init__(**prepare_locals_for_super(locals()))
-
-#     def get_observation(
-#         self,
-#         env: HomeServiceTHOREnvironment,
-#         task: Optional[Task[HomeServiceTHOREnvironment]],
-#         *args: Any,
-#         **kwargs: Any,
-#     ) -> Any:
-#         e = env.last_event
-#         rgb = e.frame.copy()
-#         h, w, _ = rgb.shape
-#         depth = e.depth_frame.copy()
-
-#         rgb = torch.from_numpy(rgb).float()
-#         if self.cuda:
-#             rgb = rgb.cuda()
-#         batch = FastBaseTransform()(rgb.unsqueeze(0))
-
-#         with torch.no_grad():
-#             preds = self.net(batch)
-        
-#         save = cfg.rescore_bbox
-#         cfg.rescore_bbox = True
-#         t = postprocess(preds, w, h, )
-
-#         inst_seg_frame = e.instance_segmentation_frame
-#         inst_mask = []
-#         inst_bbox = []
-#         inst_label = []
-#         inst_detected = np.zeros(len(self.ordered_object_types), dtype=np.int32)
-
-#         det_objs = [obj for obj in e.instance_masks if obj.split('|')[0] in self.ordered_object_types]
-#         for obj in det_objs:
-#             obj_type = obj.split("|")[0]
-#             obj_type_idx = self.object_type_to_idn[obj_type]
-#             rgb[e.instance_masks[obj]] = inst_seg_frame[e.instance_masks[obj]]
-#             inst_label.append(obj_type_idx)
-#             inst_mask.append(e.instance_masks[obj])
-#             inst_bbox.append(e.instance_detections2D[obj])
-#             inst_detected[obj_type_idx] += 1
-
-#         return {
-#             'inst_seg_image': inst_seg_frame,
-#             'inst_seg_on_rgb': rgb,
-#             'inst_label': np.array(inst_label),
-#             'inst_mask': np.array(inst_mask),
-#             'inst_bbox': np.array(inst_bbox),
-#             'inst_detected': inst_detected,
-#         }

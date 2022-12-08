@@ -42,15 +42,9 @@ class HomeServiceActorCriticSimpleConvRNN(ActorCriticModel[CategoricalDistr]):
         action_space: gym.spaces.Discrete,
         observation_space: gym.spaces.Dict,
         rgb_uuid: str,
-        subtask_uuid: str,
-        rel_position_change_uuid: str,
         ordered_object_types: Sequence[str],
         hidden_size=512,
         prev_action_embedding_dim: int = 32,
-        task_type_embedding_dim: int = 32,
-        object_type_embedding_dim: int = 128,
-        object_visible_embedding_dim: int = 16,
-        position_dim: int = 32,
         num_rnn_layers=1,
         rnn_type="GRU",
     ):
@@ -69,31 +63,15 @@ class HomeServiceActorCriticSimpleConvRNN(ActorCriticModel[CategoricalDistr]):
         self._hidden_size = hidden_size
 
         self.rgb_uuid = rgb_uuid
-        self.subtask_uuid = subtask_uuid
-        self.rel_position_change_uuid = rel_position_change_uuid
 
         self.prev_action_embedder = nn.Embedding(
             action_space.n + 1, embedding_dim=prev_action_embedding_dim
         )
-        self.task_type_embedder = nn.Embedding(
-            num_embeddings=8, embedding_dim=task_type_embedding_dim
-        )
-        self.object_type_embedder = nn.Embedding(
-            num_embeddings=len(ordered_object_types) + 1, embedding_dim=object_type_embedding_dim,
-        )
-        self.object_visible_embedder = nn.Embedding(
-            num_embeddings=3, embedding_dim=object_visible_embedding_dim,
-        )
-        self.position_encoder = nn.Linear(11, position_dim)
 
         self.visual_encoder = self._create_visual_encoder()
 
         self.state_encoder = RNNStateEncoder(
             prev_action_embedding_dim
-            + task_type_embedding_dim
-            + object_type_embedding_dim * 2
-            + object_visible_embedding_dim * 2
-            + position_dim
             + self.recurrent_hidden_state_size,
             self._hidden_size,
             num_layers=num_rnn_layers,
@@ -150,8 +128,6 @@ class HomeServiceActorCriticSimpleConvRNN(ActorCriticModel[CategoricalDistr]):
         masks: torch.FloatTensor,
     ) -> Tuple[ActorCriticOutput[DistributionType], Optional[Memory]]:
         cur_img = observations[self.rgb_uuid]
-        subtask = observations[self.subtask_uuid]
-        import pdb; pdb.set_trace()
 
         x = self.visual_encoder({self.rgb_uuid: cur_img})
         x, rnn_hidden_states = self.state_encoder(x, memory.tensor("rnn"), masks)
@@ -169,14 +145,8 @@ class HomeServiceResNetActorCriticRNN(HomeServiceActorCriticSimpleConvRNN):
         action_space: gym.spaces.Discrete,
         observation_space: gym.spaces.Dict,
         rgb_uuid: str,
-        subtask_uuid: str,
-        rel_position_change_uuid: str,
         ordered_object_types: Sequence[str],
         hidden_size=512,
-        task_type_embedding_dim: int = 32,
-        object_type_embedding_dim: int = 128,
-        object_visible_embedding_dim: int = 16,
-        position_dim: int = 32,
         num_rnn_layers=1,
         rnn_type="GRU",
     ):
@@ -232,16 +202,7 @@ class HomeServiceResNetActorCriticRNN(HomeServiceActorCriticSimpleConvRNN):
             ((~masks.bool()).long() * (prev_actions.unsqueeze(-1) + 1))
         ).squeeze(-2)
 
-        subtask = observations[self.subtask_uuid]
-        task_type_x = self.task_type_embedder(subtask['type'])
-        target_type_x = self.object_type_embedder(subtask['target_type'])
-        target_visible_x = self.object_visible_embedder(subtask['target_visible'])
-        place_type_x = self.object_type_embedder(subtask['place_type'])
-        place_visible_x = self.object_visible_embedder(subtask['place_visible'])
-        position_x = torch.cat([observations['rel_position_change']['agent_locs'], subtask['target_position'], subtask['place_position']], -1)
-        position_x = self.position_encoder(position_x)
-        x = torch.cat([vis_x, prev_action_x, task_type_x, target_type_x, target_visible_x, place_type_x, place_visible_x, position_x], -1)
-        # print(f'x.shape: {x.shape}')
+        x = torch.cat([vis_x, prev_action_x], -1)
 
         x, rnn_hidden_states = self.state_encoder(x, memory.tensor("rnn"), masks)
 

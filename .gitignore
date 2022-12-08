@@ -159,4 +159,6 @@ data/home_service/old
 .word_vectors_cache
 data_detector_old
 *_out
+*_output
 out
+data/*/*/

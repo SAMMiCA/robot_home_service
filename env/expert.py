@@ -3,16 +3,17 @@
 import copy
 import random
 import math
-from networkx.algorithms.shortest_paths.generic import shortest_path
 import numpy as np
 from collections import defaultdict
 from typing import (
+    Set,
+    cast,
+    Any,
+    List,
     Dict,
     Tuple,
-    Any,
     Optional,
     Union,
-    List,
     Sequence,
     TYPE_CHECKING,
 )
@@ -29,53 +30,55 @@ from allenact_plugins.ithor_plugin.ithor_util import (
     round_to_factor,
     include_object_data,
 )
-from env.constants import NOT_PROPER_RECEPTACLES, SCENE_TO_SCENE_TYPE, STEP_SIZE, VISIBILITY_DISTANCE
+from env.constants import NOT_PROPER_RECEPTACLES, STEP_SIZE, VISIBILITY_DISTANCE
 from env.environment import (
-    HomeServiceTHOREnvironment,
+    HomeServiceEnvironment,
     HomeServiceMode,
-    HomeServiceTaskSpec,
 )
-from env.utils import filter_positions
 
 if TYPE_CHECKING:
-    from env.tasks import HomeServiceSimplePickAndPlaceTask, HomeServiceBaseTask
+    from env.tasks import HomeServiceTask
 
 AgentLocKeyType = Tuple[float, float, int, int]
+AgentFullLocKeyType = Tuple[
+    float, float, int, int, float, bool
+]  # x, z, rot, hor, y, standing
 PositionKeyType = Tuple[float, float, float]
 
 
-# class ExplorerTHOR:
-#     def __init__(
-#         self,
-#         task_spec: HomeServiceTaskSpec,
-#     ):
-#         self.current_task_spec = task_spec
+def _are_agent_locations_equal(
+    ap0: Dict[str, Union[float, int, bool]],
+    ap1: Dict[str, Union[float, int, bool]],
+    ignore_standing: bool,
+    tol=1e-2,
+    ignore_y: bool = True,
+):
+    """Determines if two agent locations are equal up to some tolerance."""
 
-#     @property
-#     def goto_actions(self) -> Sequence[str]:
-#         goto_actions = []
-#         target_scene_type = SCENE_TO_SCENE_TYPE[self.current_task_spec.target_scene]
-#         goto_actions.append(f"Goto{target_scene_type}")
-#         for _ in range(4):
-#             goto_actions.append(f"RotateRight")
-        
-#         return goto_actions
+    def rot_dist(r0: float, r1: float):
+        diff = abs(r0 - r1) % 360
+        return min(diff, 360 - diff)
 
-    
+    return (
+        all(
+            abs(ap0[k] - ap1[k]) <= tol
+            for k in (["x", "z"] if ignore_y else ["x", "y", "z"])
+        )
+        and rot_dist(ap0["rotation"], ap1["rotation"]) <= tol
+        and rot_dist(ap0["horizon"], ap1["horizon"]) <= tol
+        and (ignore_standing or (ap0["standing"] == ap1["standing"]))
+    )
 
 
-class ShortestPathNavigatorTHOR:
-    """Tracks shortest paths in AI2-THOR environments.
-
-    Assumes 90 degree rotations and fixed step sizes.
-
+class ShortestPathNavigator:
+    """
     # Attributes
     controller : The AI2-THOR controller in which shortest paths are computed.
     """
 
     def __init__(
         self,
-        controller: ai2thor.controller.Controller,
+        env: HomeServiceEnvironment,
         grid_size: float,
         include_move_left_right: bool = False,
     ):
@@ -94,45 +97,28 @@ class ShortestPathNavigatorTHOR:
         self._current_graph: Optional[nx.DiGraph] = None
 
         self._grid_size = grid_size
-        self.controller = controller
+        self.env = env
 
         self._include_move_left_right = include_move_left_right
         self._position_to_object_id: Dict[PositionKeyType, str] = {}
 
-    @lazy_property
-    def nav_actions_set(self) -> frozenset:
-        """Navigation actions considered when computing shortest paths."""
-        nav_actions = [
-            "LookUp",
-            "LookDown",
-            "RotateLeft",
-            "RotateRight",
-            "MoveAhead",
-        ]
-        if self._include_move_left_right:
-            nav_actions.extend(["MoveLeft", "MoveRight"])
-        return frozenset(nav_actions)
-
+    '''
+    ########################### Properties ###########################
+    '''
     @property
     def scene_name(self) -> str:
         """Current ai2thor scene."""
-        return self.controller.last_event.metadata["sceneName"]
+        return self.env.scene
 
     @property
     def last_action_success(self) -> bool:
         """Was the last action taken by the agent a success?"""
-        return self.controller.last_event.metadata["lastActionSuccess"]
+        return self.env.controller.last_event.metadata["lastActionSuccess"]
 
     @property
     def last_event(self) -> ai2thor.server.Event:
         """Last event returned by the controller."""
-        return self.controller.last_event
-
-    def on_reset(self):
-        """Function that must be called whenever the AI2-THOR controller is
-        reset."""
-        self._current_scene = None
-        self._position_to_object_id = {}
+        return self.env.controller.last_event
 
     @property
     def graph(self) -> nx.DiGraph:
@@ -153,16 +139,53 @@ class ShortestPathNavigatorTHOR:
         self._current_graph = self._cached_graphs[self.scene_name].copy()
         return self._current_graph
 
+    @lazy_property
+    def nav_actions_set(self) -> frozenset:
+        """Navigation actions considered when computing shortest paths."""
+        nav_actions = [
+            "LookUp",
+            "LookDown",
+            "RotateLeft",
+            "RotateRight",
+            "MoveAhead",
+        ]
+        if self._include_move_left_right:
+            nav_actions.extend(["MoveLeft", "MoveRight"])
+        return frozenset(nav_actions)
+
+    @lazy_property
+    def possible_neighbor_offsets(self) -> Tuple[AgentLocKeyType, ...]:
+        """Offsets used to generate potential neighbors of a node."""
+        grid_size = round(self._grid_size, 2)
+        offsets = []
+        for rot_diff in [-90, 0, 90]:
+            for horz_diff in [-30, 0, 30, 60]:
+                for x_diff in [-grid_size, 0, grid_size]:
+                    for z_diff in [-grid_size, 0, grid_size]:
+                        if (rot_diff != 0) + (horz_diff != 0) + (x_diff != 0) + (
+                            z_diff != 0
+                        ) == 1:
+                            offsets.append((x_diff, z_diff, rot_diff, horz_diff))
+        return tuple(offsets)
+    '''
+    ########################### Methods ###########################
+    '''
+    def on_reset(self):
+        """Function that must be called whenever the AI2-THOR controller is
+        reset."""
+        self._current_scene = None
+        self._position_to_object_id = {}
+
     def reachable_points_with_rotations_and_horizons(
         self,
     ) -> List[Dict[str, Union[float, int]]]:
         """Get all the reaachable positions in the scene along with possible
         rotation/horizons."""
 
-        self.controller.step(action="GetReachablePositions")
+        self.env.controller.step(action="GetReachablePositions")
         assert self.last_action_success
 
-        points_slim = filter_positions(self._grid_size, 90.0, self.last_event.metadata["actionReturn"], ["x", "z"])
+        points_slim = self.last_event.metadata["actionReturn"]
 
         points = []
         for r in [0, 90, 180, 270]:
@@ -174,34 +197,6 @@ class ShortestPathNavigatorTHOR:
                     points.append(p)
 
         return points
-
-    @staticmethod
-    def location_for_key(key, y_value=0.0) -> Dict[str, Union[float, int]]:
-        """Return a agent location dictionary given a graph node key."""
-        x, z, rot, hor = key
-        loc = dict(x=x, y=y_value, z=z, rotation=rot, horizon=hor)
-        return loc
-
-    @staticmethod
-    def get_key(input_dict: Dict[str, Any], ndigits: int = 2) -> AgentLocKeyType:
-        """Return a graph node key given an input agent location dictionary."""
-        if "x" in input_dict:
-            x = input_dict["x"]
-            z = input_dict["z"]
-            rot = input_dict["rotation"]
-            hor = input_dict["horizon"]
-        else:
-            x = input_dict["position"]["x"]
-            z = input_dict["position"]["z"]
-            rot = input_dict["rotation"]["y"]
-            hor = input_dict["cameraHorizon"]
-
-        return (
-            round(x, ndigits),
-            round(z, ndigits),
-            round_to_factor(rot, 90) % 360,
-            round_to_factor(hor, 30) % 360,
-        )
 
     def update_graph_with_failed_action(self, failed_action: str):
         """If an action failed, update the graph to let it know this happened
@@ -288,21 +283,6 @@ class ShortestPathNavigatorTHOR:
 
         if action is not None:
             g.add_edge(s, t, action=action)
-
-    @lazy_property
-    def possible_neighbor_offsets(self) -> Tuple[AgentLocKeyType, ...]:
-        """Offsets used to generate potential neighbors of a node."""
-        grid_size = round(self._grid_size, 2)
-        offsets = []
-        for rot_diff in [-90, 0, 90]:
-            for horz_diff in [-30, 0, 30, 60]:
-                for x_diff in [-grid_size, 0, grid_size]:
-                    for z_diff in [-grid_size, 0, grid_size]:
-                        if (rot_diff != 0) + (horz_diff != 0) + (x_diff != 0) + (
-                            z_diff != 0
-                        ) == 1:
-                            offsets.append((x_diff, z_diff, rot_diff, horz_diff))
-        return tuple(offsets)
 
     def _add_node_to_graph(self, graph: nx.DiGraph, s: AgentLocKeyType):
         """Add a node to the graph along with any adjacent edges."""
@@ -412,72 +392,124 @@ class ShortestPathNavigatorTHOR:
             return nx.shortest_path_length(self.graph, source_state_key, goal_state_key)
         except nx.NetworkXNoPath as _:
             return float("inf")
+    '''
+    ########################### Static Methods ###########################
+    '''
+    @staticmethod
+    def location_for_key(key, y_value=0.0) -> Dict[str, Union[float, int]]:
+        """Return a agent location dictionary given a graph node key."""
+        x, z, rot, hor = key
+        loc = dict(x=x, y=y_value, z=z, rotation=rot, horizon=hor)
+        return loc
 
+    @staticmethod
+    def get_key(input_dict: Dict[str, Any], ndigits: int = 2) -> AgentLocKeyType:
+        """Return a graph node key given an input agent location dictionary."""
+        if "x" in input_dict:
+            x = input_dict["x"]
+            z = input_dict["z"]
+            rot = input_dict["rotation"]
+            hor = input_dict["horizon"]
+        else:
+            x = input_dict["position"]["x"]
+            z = input_dict["position"]["z"]
+            rot = input_dict["rotation"]["y"]
+            hor = input_dict["cameraHorizon"]
 
-def _are_agent_locations_equal(
-    ap0: Dict[str, Union[float, int, bool]],
-    ap1: Dict[str, Union[float, int, bool]],
-    ignore_standing: bool,
-    tol=1e-2,
-    ignore_y: bool = True,
-):
-    """Determines if two agent locations are equal up to some tolerance."""
-
-    def rot_dist(r0: float, r1: float):
-        diff = abs(r0 - r1) % 360
-        return min(diff, 360 - diff)
-
-    return (
-        all(
-            abs(ap0[k] - ap1[k]) <= tol
-            for k in (["x", "z"] if ignore_y else ["x", "y", "z"])
+        return (
+            round(x, ndigits),
+            round(z, ndigits),
+            round_to_factor(rot, 90) % 360,
+            round_to_factor(hor, 30) % 360,
         )
-        and rot_dist(ap0["rotation"], ap1["rotation"]) <= tol
-        and rot_dist(ap0["horizon"], ap1["horizon"]) <= tol
-        and (ignore_standing or (ap0["standing"] == ap1["standing"]))
-    )
+
+    @staticmethod
+    def get_full_key(input_dict: Dict[str, Any], ndigits: int = 2) -> AgentFullLocKeyType:
+        key = ShortestPathNavigator.get_key(input_dict=input_dict, ndigits=ndigits)
+
+        assert "standing" in input_dict
+
+        if "y" in input_dict:
+            return key + (
+                cast(float, input_dict["y"]),
+                cast(bool, input_dict["standing"]),
+            )
+        else:
+            return key + (
+                cast(float, input_dict["position"]["y"]),
+                cast(bool, input_dict["standing"]),
+            )
+
+    @staticmethod
+    def get_key_from_full(input_key: AgentFullLocKeyType) -> AgentLocKeyType:
+        return input_key[:4]
+
+    @staticmethod
+    def location_for_full_key(
+        key: AgentFullLocKeyType
+    ) -> Dict[str, Union[float, int, bool]]:
+        x, z, rot, hor, y, standing = key
+        return dict(x=x, y=y, z=z, rotation=rot, horizon=hor, standing=standing)
 
 
-# class GreedySimplePickAndPlaceExpert:
+class GreedySimpleHomeServiceExpert:
     """An agent which greedily attempts to complete a given unshuffle task."""
 
     def __init__(
         self,
-        task: "HomeServiceSimplePickAndPlaceTask",
-        shortest_path_navigator: ShortestPathNavigatorTHOR,
+        task: "HomeServiceTask",
+        shortest_path_navigator: ShortestPathNavigator,
         max_priority_per_object: int = 3,
+        max_priority_per_receptacle: int = 3,
+        steps_for_time_pressure: int = 200,
+        exploration_enabled: bool = True,
+        scan_before_move: bool = True,
     ):
-        """Initializes a `GreedyUnshuffleExpert` object.
+        get_logger().debug(
+            f"Expert started for {task.env.scene} (exploration: {exploration_enabled})"
+        )
+        self.exploration_enabled = exploration_enabled
+        self.scan_before_move = scan_before_move
 
-        # Parameters
-        task : An `UnshuffleTask` that the greedy expert should attempt to complete.
-        shortest_path_navigator : A `ShortestPathNavigatorTHOR` object defined on the same
-            AI2-THOR controller used by the `task`.
-        max_priority_per_object : The maximum number of times we should try to unshuffle an object
-            before giving up.
-        """
         self.task = task
+        assert self.task.num_steps_taken() == 0
+
         self.shortest_path_navigator = shortest_path_navigator
         self.max_priority_per_object = max_priority_per_object
 
-        assert self.task.num_steps_taken() == 0
+        self._last_to_target_recep_id: Optional[str] = None
+        self.scanned_receps = set()
+        self._current_object_target_keys: Optional[Set[AgentLocKeyType]] = None
+        self.recep_id_loc_per_room = dict()
+        self.cached_locs_for_recep = dict()
+
+        self.max_priority_per_receptacle = max_priority_per_receptacle
+        self.recep_id_to_priority: defaultdict = defaultdict(lambda: 0)
+        self.visited_recep_ids_per_room = {
+            room: set() for room in self.env.room_to_poly
+        }
+        self.unvisited_recep_ids_per_room = self.env.room_to_static_receptacle_ids()
+
+        self.steps_for_time_pressure = steps_for_time_pressure
+
+        self.last_expert_mode: Optional[str] = None
 
         self.expert_action_list: List[int] = []
 
-        self._last_held_object_name: Optional[str] = None
+        self._last_held_object_id: Optional[str] = None
         self._last_to_interact_object_pose: Optional[Dict[str, Any]] = None
-        # self._name_of_object_we_wanted_to_pickup: Optional[str] = None
-        # self._name_of_object_we_wanted_to_open_close: Optional[str] = None
-        # self.object_name_to_priority: defaultdict = defaultdict(lambda: 0)
-
-        # Added parameter
-        self._target_object_to_pickup: Optional[Dict[str, Any]] = None
-        self._receptacle_object_to_open: Optional[Dict[str, Any]] = None
-        self._receptacle_object_to_close: Optional[Dict[str, Any]] = None
+        self._id_of_object_we_wanted_to_pickup: Optional[str] = None
+        self.object_id_to_priority: defaultdict = defaultdict(lambda: 0)
 
         self.shortest_path_navigator.on_reset()
         self.update(action_taken=None, action_success=None)
 
+    '''
+    ########################### Properties ###########################
+    '''
+    @property
+    def env(self) -> HomeServiceEnvironment:
+        return self.task.env
 
     @property
     def expert_action(self) -> int:
@@ -488,122 +520,256 @@ def _are_agent_locations_equal(
         `self.task.action_names()`. For this action to be available the
         `update` function must be called after every step.
         """
-        assert self.task.num_steps_taken() == len(self.expert_action_list) - 1, (
-            f"self.task.num_steps_taken(): {self.task.num_steps_taken()} is not equal to \
-                len(self.expert_action_list) - 1: {len(self.expert_action_list) - 1}"
-        )
+        assert self.task.num_steps_taken() == len(self.expert_action_list) - 1
         return self.expert_action_list[-1]
 
-    def update(self, action_taken: Optional[int], action_success: Optional[bool]):
-        """Update the expert with the last action taken and whether or not that
-        action succeeded."""
-        if action_taken is not None:
-            assert action_success is not None
-
-            action_names = self.task.action_names()
-            last_expert_action = self.expert_action_list[-1]
-            agent_took_expert_action = action_taken == last_expert_action
-            action_str = action_names[action_taken]
-
-            was_nav_action = any(k in action_str for k in ["move", "rotate", "look"])
-
-            if "open_by_type" in action_str and agent_took_expert_action:
-                self._receptacle_object_to_open = self._last_to_interact_object_pose
-
-            if not action_success:  ## not succeeded
-                if was_nav_action:
-                    self.shortest_path_navigator.update_graph_with_failed_action(
-                        stringcase.pascalcase(action_str)
-                    )
-                elif (
-                    "pickup_" in action_str 
-                    or "open_by_type" in action_str 
-                    or "close_by_type" in action_str 
-                    or "put_by_type" in action_str
-                ) and action_taken == last_expert_action:
-                    assert self._last_to_interact_object_pose is not None
-                    self._invalidate_interactable_loc_for_pose(
-                        location=self.task.env.get_agent_location(),
-                        obj_pose=self._last_to_interact_object_pose,
-                    )
-                elif (
-                    ("crouch" in action_str or "stand" in action_str) 
-                    and action_taken == last_expert_action
-                ):
-                    agent_loc = self.task.env.get_agent_location()
-                    agent_loc["standing"] = not agent_loc["standing"]
-                    self._invalidate_interactable_loc_for_pose(
-                        location=agent_loc,
-                        obj_pose=self._last_to_interact_object_pose,
-                    )
-
-            else:
-                # If the action succeeded and was not a move action then let's force an update
-                # of our currently targeted object
-                if not was_nav_action:
-                    if "open_by_type" in action_str:
-                        self._receptacle_object_to_close = self._receptacle_object_to_open
-                        self._receptacle_object_to_open = None
-                    elif "close_by_type" in action_str:
-                        self._receptacle_object_to_close = None
-                    elif "put_by_type" in action_str:
-                        assert self.task.env.held_object is None
-                        self._target_object_to_pickup = None
-                    self._last_to_interact_object_pose = None
-
-        held_object = self.task.env.held_object
-        if self.task.env.held_object is not None:
-            self._last_held_object_name = held_object["name"]
-
-        self._generate_and_record_expert_action()
-
-    def _expert_nav_action_to_obj(self, obj: Dict[str, Any]) -> Optional[str]:
-        """Get the shortest path navigational action towards the object obj.
-
-        The navigational action takes us to a position from which the
-        object is interactable.
+    '''
+    ########################### Methods ###########################
+    '''
+    def _expert_nav_action_to_room(
+        self,
+        room: str,
+        xz_tol: float = 0.75,
+        horizon=30,
+        future_agent_loc: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
         """
-        env: HomeServiceTHOREnvironment = self.task.env
-        agent_loc = env.get_agent_location()
+        Get the shortest path navigational action towards the current room_id's centroid.
+        """
+        env = self.env
         shortest_path_navigator = self.shortest_path_navigator
 
-        interactable_positions = env._interactable_positions_cache.get(
-            scene_name=env.scene, obj=obj, controller=env.controller,
-        )
+        if future_agent_loc is None:
+            agent_loc = env.get_agent_location()
+        else:
+            agent_loc = future_agent_loc
+        source_state_key = shortest_path_navigator.get_key(agent_loc)
 
-        target_keys = [
-            shortest_path_navigator.get_key(loc) for loc in interactable_positions
-        ]
-        if len(target_keys) == 0:
+        goal_xz = env.room_reachable_centroid(room)
+        if goal_xz is None:
+            get_logger().debug(
+                f"ERROR: Unable to find reachable location near {room}'s centroid."
+            )
+            return None
+        
+        goal_loc = dict(x=goal_xz[0], z=goal_xz[1], rotation=0, horizon=horizon,)
+        target_key = shortest_path_navigator.get_key(goal_loc)
+
+        action = "Pass"
+        if (
+            abs(source_state_key[0] - target_key[0]) > xz_tol
+            or abs(source_state_key[1] - target_key[1]) > xz_tol
+        ):
+            try:
+                action = shortest_path_navigator.shortest_path_next_action(
+                    source_state_key=source_state_key, target_key=target_key,
+                )
+            except nx.NetworkXNoPath as _:
+                action = None
+
+        return action
+
+    def _expert_nav_action_to_obj(
+        self,
+        obj: Dict[str, Any],
+        force_standing: Optional[int] = None,
+        force_horizon: Optional[bool] = None,
+        objs_on_recep: Optional[Set[str]] = None,
+        future_agent_loc: Dict[str, Any] = None,
+        recep_target_keys: Optional[Set[AgentLocKeyType]] = None,
+    ) -> Optional[str]:
+        """
+        Get the shortest path navigational action towards the object obj.
+        The navigational action takes us to a position from which the object is interactable.
+        """
+        env: HomeServiceEnvironment = self.env
+        if future_agent_loc is None:
+            agent_loc = env.get_agent_location()
+        else:
+            agent_loc = future_agent_loc
+        shortest_path_navigator = self.shortest_path_navigator
+
+        interactable_positions = None
+        if recep_target_keys is None:
+            reachable_positions = env.controller.step(
+                "GetReachablePositions",
+            ).metadata["actionReturn"]
+
+            interactable_positions = env._interactable_positions_cache.get(
+                scene_name=env.scene,
+                obj=obj,
+                controller=env,
+                reachable_positions=reachable_positions,
+                force_horizon=force_horizon,
+                force_standing=force_standing,
+                avoid_teleport=objs_on_recep is not None,
+            )
+
+            if len(interactable_positions) == 0:
+                self._current_object_target_keys = set()
+                return None
+
+            if objs_on_recep is not None:
+                interactable_positions = self._search_locs_to_interact_with_objs_on_recep(
+                    obj,
+                    interactable_positions,
+                    objs_on_recep,
+                    force_horizon,
+                    force_standing,
+                )
+            
+            full_target_keys = [
+                shortest_path_navigator.get_full_key(loc)
+                for loc in interactable_positions
+            ]
+        else:
+            full_target_keys = list(recep_target_keys)
+
+        if future_agent_loc is None:
+            self._current_object_target_keys = set(full_target_keys)
+
+        if len(full_target_keys) == 0:
             return None
 
-        source_state_key = shortest_path_navigator.get_key(env.get_agent_location())
+        source_state_key = shortest_path_navigator.get_key(agent_loc)
+        target_keys = [
+            shortest_path_navigator.get_key_from_full(key)
+            for key in full_target_keys
+        ]
 
         action = "Pass"
         if source_state_key not in target_keys:
             try:
                 action = shortest_path_navigator.shortest_path_next_action_multi_target(
-                    source_state_key=source_state_key, goal_state_keys=target_keys,
+                    source_state_key=source_state_key,
+                    goal_state_keys=target_keys,
                 )
             except nx.NetworkXNoPath as _:
-                # Could not find the expert actions
                 return None
-
+        
         if action != "Pass":
             return action
+        
         else:
-            agent_x = agent_loc["x"]
-            agent_z = agent_loc["z"]
-            for gdl in interactable_positions:
-                d = round(abs(agent_x - gdl["x"]) + abs(agent_z - gdl["z"]), 2)
-                if d <= 1e-2:
-                    if _are_agent_locations_equal(agent_loc, gdl, ignore_standing=True):
-                        if agent_loc["standing"] != gdl["standing"]:
-                            return "Crouch" if agent_loc["standing"] else "Stand"
-                        else:
-                            # We are already at an interactable position
-                            return "Pass"
-            return None
+            tol = 1e-2
+            if interactable_positions is None:
+                interactable_positions = [
+                    shortest_path_navigator.location_for_full_key(key)
+                    for key in full_target_keys
+                ]
+                tol = 2e-2
+            return self.crouch_stand_if_needed(
+                interactable_positions, agent_loc, tol=tol
+            )
+
+    def _search_locs_to_interact_with_objs_on_recep(
+        self,
+        obj: Dict[str, Any],
+        interactable_positions: List[Dict[str, Union[float, int, bool]]],
+        objs_on_recep: Set[str],
+        force_horizon: int,
+        force_standing: bool,
+    ) -> List[Dict[str, Union[float, int, bool]]]:
+        # Try to find an interactable positions for all objects on objs_on_recep
+        interactable_positions = self._try_to_interact_with_objs_on_recep(
+            self.env,
+            interactable_positions,
+            objs_on_recep,      # modified in-place
+            force_horizon,
+            force_standing
+        )
+
+        # Try to get close to the target
+        obj_loc = tuple(obj["position"][x] for x in "xyz")
+        radius = 0.7        # emprically, it seems unlikely to find a valid location closer than 0.7
+        new_positions = []
+        unused_positions = set(
+            tuple(p[x] for x in ["x", "y", "z", "rotation", "standing", "horizon"])
+            for p in interactable_positions
+        )
+
+        while len(new_positions) == 0:
+            available_locs = list(unused_positions)
+            for loc in available_locs:
+                if sum((loc[x] - obj_loc[x]) ** 2 for x in [0, 2]) <= radius * radius:
+                    new_positions.append(loc)
+                    unused_positions.remove(loc)
+            radius += 0.2
+
+        return [
+            {
+                x: p[ix]
+                for ix, x in enumerate(
+                    ["x", "y", "z", "rotation", "standing", "horizon"]
+                )
+            }
+            for p in new_positions
+        ]
+
+    def exploration_pose(self, horizon=30):
+        if not self.env.last_event.metadata["agent"]["isStanding"]:
+            return dict(action="Stand")
+        if round(self.env.last_event.metadata["agent"]["cameraHorizon"]) > horizon + 15:
+            return dict(action="LookUp")
+        if round(self.env.last_event.metadata["agent"]["cameraHorizon"]) < horizon - 15:
+            return dict(action="LookDown")
+        return None
+
+    def uncovered_ids_on_recep(self, recep_obj, max_objs_to_check=6):
+        return set(recep_obj["receptacleObjectIds"][:max_objs_to_check])
+
+    def get_unscanned_receps(self, rooms_to_check, standing=True, horizon=30):
+        agent_key = self.shortest_path_navigator.get_key(self.env.get_agent_location())
+        all_objects = self.env.objects()
+
+        for room in rooms_to_check:
+            recep_ids_to_check = list(self.unvisited_recep_ids_per_room[room])
+            for current_recep_id in recep_ids_to_check:
+                if current_recep_id in self.scanned_receps:
+                    get_logger().debug(
+                        f"ERROR: {current_recep_id} already in `self.scanned_receps`."
+                    )
+                    self.unvisited_recep_ids_per_room[room].remove(current_recep_id)
+                    self.visited_recep_ids_per_room[room].add(current_recep_id)
+                    continue
+
+                current_recep = next(
+                    o for o in all_objects if o["objectId"] == current_recep_id
+                )
+                
+                uncovered = self.uncovered_ids_on_recep(current_recep)
+
+                if current_recep["objectId"] not in self.cached_locs_for_recep:
+                    needs_action = self._expert_nav_action_to_obj(
+                        current_recep,
+                        force_standing=standing,
+                        force_horizon=horizon,
+                        objs_on_recep=uncovered.copy(),
+                    )
+
+    def current_direction(self):
+        agent_rot = self.env.last_event.metadata["agent"]["rotation"]["y"] % 360
+        if 225 <= agent_rot < 315:  # 270
+            direction = (-1, 0)
+        elif 315 <= agent_rot or agent_rot < 45:  # 0 (360)
+            direction = (0, 1)
+        elif 45 <= agent_rot <= 135:  # 90
+            direction = (1, 0)
+        else:  # if 135 <= agent_rot < 225:  # 180
+            direction = (0, -1)
+        return direction
+
+    def _log_output_mode(self, expert_mode: str, action_dict: Dict[str, Any]) -> Dict[str, Any]:
+        if self.last_expert_mode != expert_mode:
+            get_logger().debug(f"{expert_mode} mode")
+            self.last_expert_mode = expert_mode
+        return action_dict
+
+    def prioritize_receps(self):
+        agent_loc = self.env.get_agent_location()
+
+        assert self.env.current_room is not None
+        recep_ids = self.unvisited_recep_ids_per_room[self.env.current_room]
 
     def _invalidate_interactable_loc_for_pose(
         self, location: Dict[str, Any], obj_pose: Dict[str, Any]
@@ -625,195 +791,113 @@ def _are_agent_locations_equal(
                 return True
         return False
 
-    def _generate_expert_action_dict(self) -> Dict[str, Any]:
-        """Generate a dictionary describing the next greedy expert action."""
-        env: HomeServiceTHOREnvironment = self.task.env
+    def manage_held_object(self) -> Optional[Dict[str, Any]]:
+        if self.env.held_object is None:
+            return None
 
-        if env.mode != HomeServiceMode.SNAP:
-            raise NotImplementedError(
-                f"Expert only defined for 'easy' mode (current mode: {env.mode}"
-            )
+        self._last_to_interact_object_pose = None
 
-        held_object = env.held_object
-        agent_loc = env.get_agent_location()
-        pickup_target = env.current_task_spec.pickup_target
-        place_target = env.current_task_spec.place_target
-
+        # Should navigate to a position where the held object can be placed
         expert_nav_action = self._expert_nav_action_to_obj(
-            obj=env.current_task_spec.pickup_target
+            obj={
+                **self.env.held_object,
+                **{
+                    k: self.env.object_id_to_target_pose[
+                        self.env.held_object["objectId"]
+                    ][k]
+                    for k in ["position", "rotation"]
+                },
+            },
         )
-        with include_object_data(env.controller):
-            visible_object_ids = [
-                obj['objectId'] for obj in env.last_event.metadata["objects"]
-                if obj["visible"]
-            ]
 
-        if held_object is None:
-            if self._last_to_interact_object_pose is None:
-                if self._receptacle_object_to_close is None:
-                    try:
-                        current_pickup_target = next(
-                            obj for obj in env.last_event.metadata["objects"]
-                            if obj["objectId"] == pickup_target["objectId"]
-                        )
-                        if current_pickup_target["parentReceptacles"] is not None:
-                            if place_target["objectId"] in current_pickup_target["parentReceptacles"]:
-                                # SimplePickAndPlaceTask Done. SUCCESS :)
-                                # print(f"{env.current_task_spec.task_type} DONE!!!!")
-                                return dict(action="Done")
-                        else:
-                            # Already put pickup target object in wrong place.
-                            # should pickup again
-                            self._last_to_interact_object_pose = current_pickup_target
-
-                    except:
-                        current_pickup_target = None
-
-                    if self._receptacle_object_to_open is None:
-                        try:
-                            self._receptacle_object_to_open = next(
-                                obj for obj in env.last_event.metadata["objects"]
-                                if obj["openable"] and obj["objectId"] in pickup_target["parentReceptacles"]
-                                and obj["objectType"] not in NOT_PROPER_RECEPTACLES
-                            )
-                            self._last_to_interact_object_pose = self._receptacle_object_to_open
-                        except:
-                            self._receptacle_object_to_open = None
-                            self._target_object_to_pickup = pickup_target
-                            self._last_to_interact_object_pose = pickup_target
-                    else:
-                        self._last_to_interact_object_pose = self._receptacle_object_to_open
-                else:
-                    self._last_to_interact_object_pose = self._receptacle_object_to_close
-            
-            expert_nav_action = self._expert_nav_action_to_obj(
-                obj=self._last_to_interact_object_pose
-            )
-
-            if expert_nav_action is None:
-                interactable_positions = env._interactable_positions_cache.get(
-                    scene_name=env.scene,
-                    obj=self._last_to_interact_object_pose,
-                    controller=env.controller,
+        if expert_nav_action is None:
+            # Could not find a path to the target,
+            return dict(action="DropHeldObjectWithSnap")
+        elif expert_nav_action == "Pass":
+            # We're in a position where we can put the object
+            parent_ids = self.env.object_id_to_target_pose[self.env.held_object["objectId"]]["parentReceptacles"]
+            if parent_ids is not None and len(parent_ids) == 1:
+                parent_type = stringcase.pascalcase(
+                    self.env.object_id_to_target_pose[parent_ids[0]]["objectType"]
                 )
-                if len(interactable_positions) != 0:
-                    # Could not find a path to the target.
-                    # Please increase the place count of the object and try generating a new action.
-                    get_logger().debug(
-                        f"Could not find a path to the object {self._last_to_interact_object_pose['objectId']}"
-                        f" in scene {env.scene}"
-                        f" when at position {agent_loc}."
-                    )
-                else:
-                    get_logger().debug(
-                        f"Object {self._last_to_interact_object_pose['objectId']} in scene {env.scene}"
-                        f" has no interactable positions."
-                    )
-                # return dict(action="Done")
-
-            elif expert_nav_action == "Pass":
-                if self._last_to_interact_object_pose["objectId"] not in visible_object_ids:
-                    if self._invalidate_interactable_loc_for_pose(
-                        location=agent_loc, obj_pose=self._last_to_interact_object_pose
-                    ):
-                        return self._generate_expert_action_dict()
-                    raise RuntimeError("This should not be possible.")
-
-                if self._last_to_interact_object_pose["objectId"] == pickup_target["objectId"]:
-                    # Trying to PickupObject
-                    return dict(action="Pickup", objectType=self._last_to_interact_object_pose["objectType"])
-                
-                elif self._last_to_interact_object_pose["objectId"] in pickup_target["parentReceptacles"]:
-                    # Pickup target object is located in the openable receptacle
-                    # Try to Open Receptacle
-                    return dict(action="OpenByType", objectType=self._last_to_interact_object_pose["objectType"])
-
-                elif self._last_to_interact_object_pose["objectType"] == place_target["objectType"]:
-                    return dict(action="CloseByType", objectType=self._last_to_interact_object_pose["objectType"])
-                
-                else:
-                    raise RuntimeError(" REALLY?? ")
-                
+                return dict(action=f"Put{parent_type}")
+            else:
+                return dict(action="DropHeldObjectWithSnap")
+        else:
             return dict(action=expert_nav_action)
         
-        else:
-            if self._last_to_interact_object_pose is None:
-                if self._receptacle_object_to_close is None:
-                    if self._receptacle_object_to_open is None:
-                        try:
-                            current_place_target = next(
-                                obj for obj in env.last_event.metadata["objects"]
-                                if obj["name"] == place_target["name"]
-                            )
-                            if current_place_target["openable"] and current_place_target["openness"] < 0.8:
-                                self._receptacle_object_to_open = current_place_target
-                                self._last_to_interact_object_pose = self._receptacle_object_to_open
-                            else:
-                                self._receptacle_object_to_open = None
-                                self._last_to_interact_object_pose = place_target
-                        
-                        except:
-                            current_place_target = None
-                            # Cannot find place target in the current scene?
-                            # Something Weird!!
-                            raise RuntimeError(" NO ")                        
-                    else:
-                        self._last_to_interact_object_pose = self._receptacle_object_to_open
+
+    def update(self, action_taken: Optional[int], action_success: Optional[bool]):
+        """Update the expert with the last action taken and whether or not that
+        action succeeded."""
+        if action_taken is not None:
+            assert action_success is not None
+
+            action_names = self.task.action_names()
+            last_expert_action = self.expert_action_list[-1]
+            agent_took_expert_action = action_taken == last_expert_action
+            action_str = action_names[action_taken]
+
+            was_nav_action = any(k in action_str for k in ["move", "rotate", "look"])
+
+            if "pickup_" in action_str and agent_took_expert_action and action_success:
+                self._id_of_object_we_wanted_to_pickup = self._last_to_interact_object_pose["objectId"]
+
+            if "put_" in action_str and agent_took_expert_action and action_success:
+                if self._id_of_object_we_wanted_to_pickup is not None:
+                    self.object_id_to_priority[
+                        self._id_of_object_we_wanted_to_pickup
+                    ] += 1
                 else:
-                    self._last_to_interact_object_pose = self._receptacle_object_to_close
+                    self.object_id_to_priority[
+                        self._last_held_object_id
+                    ] += 1
 
-            expert_nav_action = self._expert_nav_action_to_obj(
-                obj=self._last_to_interact_object_pose
-            )
+            if "open_by_type" in action_str and agent_took_expert_action:
+                self._receptacle_object_to_open = self._last_to_interact_object_pose
 
-            if expert_nav_action is None:
-                interactable_positions = env._interactable_positions_cache.get(
-                    scene_name=env.scene,
-                    obj=self._last_to_interact_object_pose,
-                    controller=env.controller,
-                )
-                if len(interactable_positions) != 0:
-                    # Could not find a path to the target.
-                    # Please increase the place count of the object and try generating a new action.
-                    get_logger().debug(
-                        f"Could not find a path to the object {self._last_to_interact_object_pose['objectId']}"
-                        f" in scene {env.scene}"
-                        f" when at position {agent_loc}."
+            if not action_success:  ## not succeeded
+                if was_nav_action:
+                    self.shortest_path_navigator.update_graph_with_failed_action(
+                        stringcase.pascalcase(action_str)
                     )
-                else:
-                    get_logger().debug(
-                        f"Object {self._last_to_interact_object_pose['objectId']} in scene {env.scene}"
-                        f" has no interactable positions."
+                elif (
+                    "pickup_" in action_str 
+                    or "open_by_type" in action_str 
+                    or "close_by_type" in action_str 
+                    or "put_by_type" in action_str
+                ) and action_taken == last_expert_action:
+                    assert self._last_to_interact_object_pose is not None
+                    self._invalidate_interactable_loc_for_pose(
+                        location=self.task.env.get_agent_location(),
+                        obj_pose=self._last_to_interact_object_pose,
+                    )
+                elif (
+                    ("crouch" in action_str or "stand" in action_str)
+                    and self.task.env.held_object is not None
+                    and action_taken == last_expert_action
+                ):
+                    held_object_id = self.task.env.held_object["objectId"]
+                    agent_loc = self.task.env.get_agent_location()
+                    agent_loc["standing"] = not agent_loc["standing"]
+                    self._invalidate_interactable_loc_for_pose(
+                        location=agent_loc,
+                        obj_pose=self.task.env.object_id_to_target_pose[held_object_id],
                     )
 
-            elif expert_nav_action == "Pass":
-                if self._last_to_interact_object_pose["objectId"] not in visible_object_ids:
-                    if self._invalidate_interactable_loc_for_pose(
-                        location=agent_loc, obj_pose=self._last_to_interact_object_pose
-                    ):
-                        return self._generate_expert_action_dict()
-                    raise RuntimeError("This should not be possible.")
+            else:
+                # If the action succeeded and was not a move action then let's force an update
+                # of our currently targeted object
+                if not was_nav_action and not (
+                    "crouch" in action_str or "stand" in action_str
+                ):
+                    self._last_to_interact_object_pose = None
 
-                if self._receptacle_object_to_open is not None:
-                    # Should open the place_target
-                    return dict(action="OpenByType", objectType=self._last_to_interact_object_pose["objectType"])
-                
-                elif self._receptacle_object_to_close is not None:
-                    # Should close the receptacle of the pickup target
-                    if self._last_to_interact_object_pose["objectId"] == place_target["objectId"]:
-                        # Put the held object (pickup_target) on the place_target
-                        return dict(action="PutByType", objectType=self._last_to_interact_object_pose["objectType"])
-                    
-                    return dict(action="CloseByType", objectType=self._last_to_interact_object_pose["objectType"])
-                
-                elif self._last_to_interact_object_pose["objectId"] == place_target["objectId"]:
-                        # Put the held object (pickup_target) on the place_target
-                        return dict(action="PutByType", objectType=self._last_to_interact_object_pose["objectType"])
+        held_object = self.task.env.held_object
+        if self.task.env.held_object is not None:
+            self._last_held_object_id = held_object["objectId"]
 
-                else:
-                    raise RuntimeError(" HOW??? ")
-            
-            return dict(action=expert_nav_action)
+        self._generate_and_record_expert_action()
 
     def _generate_and_record_expert_action(self):
         """Generate the next greedy expert action and save it to the
@@ -828,12 +912,18 @@ def _are_agent_locations_equal(
             self.expert_action_list
         ), f"{self.task.num_steps_taken()} != {len(self.expert_action_list)}"
         expert_action_dict = self._generate_expert_action_dict()
+        if expert_action_dict is None:
+            self.expert_action_list.append(None)
+            return
 
         action_str = stringcase.snakecase(expert_action_dict["action"])
         if action_str not in self.task.action_names():
-            if "objectType" in expert_action_dict:
-                obj_type = stringcase.snakecase(expert_action_dict["objectType"])
-                action_str = f"{action_str}_{obj_type}"
+            current_objectId = expert_action_dict["objectId"]
+            current_obj = next(
+                o for o in self.task.env.objects() if o["objectId"] == current_objectId
+            )
+            obj_type = stringcase.snakecase(current_obj["objectType"])
+            action_str = f"{action_str}_{obj_type}"
 
         try:
             self.expert_action_list.append(self.task.action_names().index(action_str))
@@ -843,7 +933,152 @@ def _are_agent_locations_equal(
             )
             self.expert_action_list.append(None)
 
+    def _generate_expert_action_dict(self, horizon=30) -> Optional[Dict[str, Any]]:
+        """Generate a dictionary describing the next greedy expert action."""
+        if self.env.mode != HomeServiceMode.SNAP:
+            raise NotImplementedError(
+                f"Expert only defined for 'easy' mode (current mode: {self.env.mode}"
+            )
 
+        try:
+            # Try to transport or put/drop the current object
+            attempt = self.manage_held_object()
+            if attempt is not None:
+                return self._log_output_mode("held object", attempt)
+            
+            if self.exploration_enabled:
+                # ppap
+                if not self.time_pressure():
+                    attempt = self.home_service_pickup(mode="")
+                    if attempt is not None:
+                        return self._log_output_mode("", attempt)
+                    
+                    # 
+            attempt = self.home_service_pickup(mode="")
+            if attempt is not None:
+                return self._log_output_mode("", attempt)
+
+            if self.exploration_enabled:
+                if self.env.target_room_id != self.env.current_house:
+                    get_logger().debug(
+                        f"WARNING: We cannot generate more actions despite being in {self.env.current_house},"
+                        f" away from the target {self.env.target_room_id}. Terminating"
+                    )
+            
+            return dict(action="Done")
+
+        except:
+            import traceback
+
+            get_logger().debug(f"EXCEPTION: Expert failure: {traceback.format_exc()}")
+            return None
+
+    def scan_for_target_recep(self, standing=True, horizon=30):
+        env = self.env
+
+        if self.env.current_room is None:
+            return None
+        
+        self._last_to_target_recep_id = next(
+            o["objectId"] for o in env.objects()
+            if o["object"]
+        )
+    '''
+    ########################### Static Methods ###########################
+    '''
+    @staticmethod
+    def angle_to_recep(agent_pos, agent_dir, recep_pos):
+        agent_to_recep = np.array(recep_pos) - np.array(agent_pos)
+        agent_to_recep_dir = agent_to_recep / (np.linalg.norm(agent_to_recep) + 1e-6)
+        ang_dist = np.degrees(np.arccos(np.dot(agent_to_recep_dir, agent_dir)))
+
+        if ang_dist > 45:
+            if agent_dir[0] == 0:  # z or -z
+                if agent_dir[1] == 1:  # z, so next is x
+                    if recep_pos[0] < agent_pos[0]:
+                        ang_dist = 360 - ang_dist
+                else:  # agent_dir[1] == -1:  # -z, so next is -x
+                    if recep_pos[0] > agent_pos[0]:
+                        ang_dist = 360 - ang_dist
+            else:  # agent_dir[1] == 0, so x or -x
+                if agent_dir[0] == 1:  # x, so next is -z
+                    if recep_pos[1] > agent_pos[1]:
+                        ang_dist = 360 - ang_dist
+                else:  # agent_dir[0] == -1:  # -x, so next is z
+                    if recep_pos[1] < agent_pos[1]:
+                        ang_dist = 360 - ang_dist
+        return ang_dist
+
+    @staticmethod
+    def extract_xyz(full_poses: List[Dict[str, Union[float, int, bool]]]):
+        known_xyz = set()
+        res_xyz = []
+        for pose in full_poses:
+            xyz = tuple(pose[x] for x in "xyz")
+            if xyz in known_xyz:
+                continue
+            known_xyz.add(xyz)
+            res_xyz.append({x: pose[x] for x in "xyz"})
+        
+        return res_xyz
+
+    @staticmethod
+    def _try_to_interact_with_objs_on_recep(
+        env: HomeServiceEnvironment,
+        interactable_positions: List[Dict[str, Union[float, int, bool]]],
+        objs_on_recep: Set[str],
+        horizon: int,
+        standing: bool,
+    ) -> List[Dict[str, Union[float, int, bool]]]:
+        # Try to (greedily) find an interactable positions for all/most objects on objs_on_recep
+        last_interactable = interactable_positions
+        missing_objs_on_recep = copy.copy(objs_on_recep)
+        for obj_id in missing_objs_on_recep:
+            new_interactable = env._interactable_positions_cache.get(
+                scene_name=env.scene,
+                obj=next(o for o in env.objects() if o["objectId"] == obj_id),
+                controller=env,
+                reachable_positions=GreedySimpleHomeServiceExpert.extract_xyz(
+                    last_interactable
+                ),
+                force_horizon=horizon,
+                force_standing=standing,
+                avoid_teleport=True,
+            )
+            if len(new_interactable) > 0:
+                objs_on_recep.remove(obj_id)
+                last_interactable = new_interactable
+
+        return last_interactable
+
+    @staticmethod
+    def crouch_stand_if_needed(
+        interactable_positions: List[Dict[str, Union[float, int, bool]]],
+        agent_loc: Dict[str, Union[float, int, bool]],
+        tol: float = 1e-2,
+    ) -> Optional[str]:
+        for gdl in sorted(
+            interactable_positions,
+            key=lambda ap: ap["standing"] != agent_loc["standing"],
+        ):
+            if (
+                round(
+                    abs(agent_loc["x"] - gdl["x"]) + abs(agent_loc["z"] - gdl["z"]), 2
+                )
+                <= tol
+            ):
+                if _are_agent_locations_equal(
+                    agent_loc, gdl, ignore_standing=True, tol=tol
+                ):
+                    if agent_loc["standing"] != gdl["standing"]:
+                        return "Crouch" if agent_loc["stadning"] else "Stand"
+                    else:
+                        return "Pass"
+
+        return None
+
+
+'''
 class SubTaskExpert:
     def __init__(
         self,
@@ -1540,60 +1775,4 @@ class SubTaskExpert:
             raise NotImplementedError(
                 f"Subtask {subtask_action} is not implemented."
             )       
-
-def __test():
-    from experiments.home_service_base import (
-        HomeServiceBaseExperimentConfig,
-    )
-    from env.tasks import HomeServiceTaskSampler, HomeServiceTaskType
-    task_sampler_params = HomeServiceBaseExperimentConfig.stagewise_task_sampler_args(
-        stage="train", process_ind=0, total_processes=1, headless=False,
-    )
-
-    # from env.utils import save_frames_to_mp4
-    task_sampler: HomeServiceTaskSampler = HomeServiceBaseExperimentConfig.make_sampler_fn(
-        **task_sampler_params, force_cache_reset=True, epochs=1, 
-        task_type=HomeServiceTaskType.SIMPLE_PICK_AND_PLACE,
-    )
-    random_action_prob = 0.0
-
-    shortest_path_navigator = ShortestPathNavigatorTHOR(
-        controller=task_sampler.env.controller, grid_size=STEP_SIZE
-    )
-    k = 0
-
-    while task_sampler.length > 0:
-        print(k)
-        random.seed(k)
-        k += 1
-        task = task_sampler.next_task()
-        assert task is not None
-
-        print(f'Pick{stringcase.pascalcase(task.pickup_target["objectType"])}Place{stringcase.pascalcase(task.place_target["objectType"])}')
-
-        greedy_expert = GreedySimplePickAndPlaceExpert(
-            task=task, shortest_path_navigator=shortest_path_navigator
-        )
-        controller = task_sampler.env.controller
-        frames = [controller.last_event.frame]
-        while not task.is_done():
-            if random.random() < random_action_prob:
-                assert task.action_names()[0] == "done"
-                action_to_take = random.randint(1, len(task.action_names()) - 1)
-            else:
-                action_to_take = greedy_expert.expert_action
-
-            step_result = task.step(action_to_take)
-            # task.env.controller.step("Pass")
-            # task.env.controller.step("Pass")
-            
-            greedy_expert.update(
-                action_taken=action_to_take,
-                action_success=step_result.info["action_success"]
-            )
-
-            frames.append(controller.last_event.frame)
-
-
-if __name__ == "__main__":
-    __test()
+'''

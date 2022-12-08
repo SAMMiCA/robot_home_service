@@ -12,7 +12,6 @@ import numpy as np
 from allenact.utils.system import get_logger
 from allenact_plugins.ithor_plugin.ithor_environment import IThorEnvironment
 from allenact_plugins.ithor_plugin.ithor_util import include_object_data
-from datagen.datagen_utils import scene_from_type_idx
 
 from env.constants import DEFAULT_COMPATIBLE_RECEPTACLES, MAX_HAND_METERS, ROTATION_ANGLE, STEP_SIZE, NOT_PROPER_RECEPTACLES
 
@@ -575,36 +574,6 @@ def execute_action(
 
     event = controller.step(thor_action, **kwargs)
     return event.metadata["lastActionSuccess"]
-
-def filter_positions(
-    grid_size: float, 
-    rotation_angle: float, 
-    positions: Sequence[Dict[str, Any]], 
-    compare_keys: List[str]
-):
-    n_positions = []
-    for position in positions:
-        assert all(key in position for key in compare_keys)
-        skip = False
-        for key in compare_keys:
-            if key in ['x', 'z']:
-                position[key] = round(position[key], 3)
-                if (position[key] % grid_size > 1e-2):
-                    skip = True
-                    break
-            if key == 'rotation':
-                if position[key] % rotation_angle > 1e-2:
-                    skip = True
-                    break
-        if not skip:
-            for n_position in n_positions:
-                if all([position[key] == n_position[key] for key in compare_keys]):
-                    skip = True
-                    break
-        if not skip:
-            n_positions.append(position)
-
-    return n_positions
 
 
 def get_top_down_frame(controller):

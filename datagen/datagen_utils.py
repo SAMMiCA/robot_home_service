@@ -3,37 +3,7 @@ from collections import defaultdict
 from typing import List, Dict, Set, Optional, Any, Union, Hashable, Sequence
 
 from ai2thor.controller import Controller
-# from datagen.datagen_constants import PICKUP_OBJECTS_FOR_TEST, TASK_ORDERS, OBJECT_TYPES_THAT_CAN_HAVE_IDENTICAL_MESHES
 from datagen.datagen_constants import PICKUP_OBJECTS_FOR_TEST, OBJECT_TYPES_THAT_CAN_HAVE_IDENTICAL_MESHES
-
-from env.constants import SCENE_TYPE_TO_SCENES
-
-
-def get_scenes(stage: str) -> List[str]:
-    """Returns a list of iTHOR scene names for each stage."""
-    assert stage in {"train", "train_unseen", "val", "valid", "test", "all"}
-    assert stage in {"debug", "train", "train_unseen", "val", "valid", "test", "all"}
-
-    if stage == "debug":
-        return ["FloorPlan1"]
-
-    # [1-20] for train, [21-25] for val, [26-30] for test
-    if stage in ["train", "train_unseen"]:
-        scene_nums = range(1, 21)
-    elif stage in ["val", "valid"]:
-        scene_nums = range(21, 26)
-    elif stage == "test":
-        scene_nums = range(26, 31)
-    elif stage == "all":
-        scene_nums = range(1, 31)
-    else:
-        raise NotImplementedError
-
-    kitchens = [f"FloorPlan{i}" for i in scene_nums]
-    living_rooms = [f"FloorPlan{200+i}" for i in scene_nums]
-    bedrooms = [f"FloorPlan{300+i}" for i in scene_nums]
-    bathrooms = [f"FloorPlan{400+i}" for i in scene_nums]
-    return kitchens + living_rooms + bedrooms + bathrooms
 
 
 def filter_pickupable(
@@ -194,9 +164,6 @@ def find_object_by_type(objects: List[Dict], object_type: str):
         for obj in objects
         if obj["objectType"] == object_type
     ]
-
-def scene_from_type_idx(scene_type: str, scene_idx: int):
-    return SCENE_TYPE_TO_SCENES[scene_type][scene_idx - 1]
 
 def mapping_counts(din: Dict[Hashable, Sequence[Hashable]]) -> Dict[Hashable, int]:
     """One-to-many input mapping to one-to-length output mapping"""

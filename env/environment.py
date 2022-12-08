@@ -34,7 +34,6 @@ from datagen.datagen_utils import (
     open_objs,
     get_object_ids_to_not_move_from_object_types,
     remove_objects_until_all_have_identical_meshes,
-    scene_from_type_idx,
 )
 from env.constants import (
     REQUIRED_THOR_VERSION,
@@ -43,7 +42,6 @@ from env.constants import (
     PICKUPABLE_OBJECTS,
     OPENABLE_OBJECTS,
     RECEPTACLE_OBJECTS,
-    SCENE_TO_SCENE_TYPE,
     IOU_THRESHOLD,
     OPENNESS_THRESHOLD,
     POSITION_DIFF_BARRIER,
@@ -98,8 +96,8 @@ class HomeServiceTaskSpec:
     def __init__(
         self,
         scene: str,
+        task: str,
         pickup_object: str,
-        # start_receptacle: str,
         target_receptacle: str,
         stage: Optional[str] = None,
         agent_position: Optional[Dict[str, float]] = None,
@@ -113,8 +111,8 @@ class HomeServiceTaskSpec:
     ):
         """HomeServiceTaskSpec"""
         self.scene = scene
+        self.task = task
         self.pickup_object = pickup_object
-        # self.start_receptacle = start_receptacle
         self.target_receptacle = target_receptacle
         self.stage = stage
         self.agent_position = agent_position
@@ -139,15 +137,7 @@ class HomeServiceTaskSpec:
         if self.runtime_sample:
             raise NotImplementedError("Cannot create a unique id for a runtime sample.")
 
-        return f"{self.stage}__{self.pickup_object}__{self.target_receptacle}__{self.scene}"
-
-    @property
-    def task_type(self):
-        return (
-            f"Pick_{self.pickup_object}_And_Place_{self.target_receptacle}"
-            if self.target_receptacle != "User" else
-            f"Bring_Me_{self.pickup_object}"
-        )
+        return f"{self.stage}__{self.task}__{self.metrics['house_i']}__{self.metrics['scene_i']}"
 
 
 class HomeServiceEnvironment:
@@ -501,24 +491,18 @@ class HomeServiceEnvironment:
     @property
     def target_room_id(self):
         if self._target_room_id is None:
+            house_differences = self.initial_house_differences()
+            assert len(house_differences) == 1
+            self._target_room_id = self.obj_id_with_cond_to_room(
+                self.pickupable_object_condition
+            )[house_differences[0]]
             rooms_with_differences = []
-            for room_id in self.room_to_poly:
-                room_differences = len(self.initial_room_differences(room_id))
-                if room_differences > 0:
-                    rooms_with_differences.append((room_differences, room_id))
-            assert len(rooms_with_differences) > 0
-            if len(rooms_with_differences) > 1:
-                get_logger().warning(
-                    f"Found differences in more than one room {rooms_with_differences}"
-                )
-            self._target_room_id = sorted(rooms_with_differences, reverse=True)[0][1]
 
         return self._target_room_id
 
     '''
     Methods
     '''
-
     def move_ahead(self) -> bool:
         
         return execute_action(
@@ -796,7 +780,6 @@ class HomeServiceEnvironment:
                     "MakeObjectBreakable", objectId=self.held_object["objectId"],
                 )
             except:
-                # TODO: ????????????????
                 if random.random() > 0.8:
                     get_logger().error(
                         "Unable to make object breakable while dropping with snap"
@@ -1210,7 +1193,6 @@ class HomeServiceEnvironment:
                 get_logger().debug(
                     f"THOR error message: '{self.controller.last_event.metadata['errorMessage']}. Forcing scene reset."
                 )
-                import pdb; pdb.set_trace()
                 self._task_spec_reset(
                     task_spec=task_spec,
                     force_axis_aligned_start=force_axis_aligned_start,

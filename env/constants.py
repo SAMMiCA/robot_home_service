@@ -16,56 +16,20 @@ STARTER_HOME_SERVICE_DATA_DIR = os.path.join(
 
 # Commit ID for AI2THOR-Rearrangement Challenge
 THOR_COMMIT_ID = "eb93d0b6520e567bac8ad630462b5c0c4cea1f5f"
-# PROCTHOR_COMMIT_ID = "90eac925dc750818890069e3131f899998dc58b4"
+PROCTHOR_COMMIT_ID = "90eac925dc750818890069e3131f899998dc58b4"
 # PROCTHOR_COMMIT_ID = "9561884d24ec7167a42b577e83bf5703c5d4584d"
-PROCTHOR_COMMIT_ID = "391b3fae4d4cc026f1522e5acf60953560235971"
+# PROCTHOR_COMMIT_ID = "391b3fae4d4cc026f1522e5acf60953560235971"
 
 STEP_SIZE = 0.25
 ROTATION_ANGLE = 90
 HORIZON_ANGLE = 30
 SMOOTHING_FACTOR = 1
 
-KITCHENS = [f"FloorPlan{i}" for i in range(1, 31)]
-LIVING_ROOMS = [f"FloorPlan{200 + i}" for i in range(1, 31)]
-BEDROOMS = [f"FloorPlan{300 + i}" for i in range(1, 31)]
-BATHROOMS = [f"FloorPlan{400 + i}" for i in range(1, 31)]
-
-SCENE_TYPE_TO_SCENES = {
-    "Kitchen": KITCHENS,
-    "LivingRoom": LIVING_ROOMS,
-    "Bedroom": BEDROOMS,
-    "Bathroom": BATHROOMS,
-}
-
-SCENE_TO_SCENE_TYPE = {
-    scene: scene_type
-    for scene_type, scenes in SCENE_TYPE_TO_SCENES.items()
-    for scene in scenes
-}
-
 SCENE_TYPE_TO_LABEL = {
     "Kitchen": 1,
     "LivingRoom": 2,
     "Bedroom": 3,
     "Bathroom": 4,
-}
-
-SCENE_GRAPH_DIR = os.path.join(
-    os.path.abspath(os.path.dirname(Path(__file__))), '../scene_graph'
-)
-# Yolact Arguments
-YOLACT_KWARGS = {
-    "trained_model": os.path.join(SCENE_GRAPH_DIR, "weights/yolact_base_357_200000.pth"),
-    "top_k": 5,
-    "cuda": True,
-    "fast_nms": True,
-    "cross_class_nms": False,
-    "display_masks": True,
-    "display_bboxes": True,
-    "display_text": True,
-    "display_scores": True,
-    "score_threshold": 0.85,
-    "dataset": "robot_home_service_dataset",
 }
 
 # fmt: off

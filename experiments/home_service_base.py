@@ -1,5 +1,8 @@
 import copy
 import platform
+import os
+import compress_json
+import compress_pickle
 from abc import abstractmethod
 from typing import Optional, List, Sequence, Dict, Any, Tuple
 from allenact.utils.misc_utils import md5_hash_str_as_int, partition_sequence
@@ -39,14 +42,43 @@ from env.constants import (
     THOR_COMMIT_ID,
     PROCTHOR_COMMIT_ID,
     VISIBILITY_DISTANCE,
-    YOLACT_KWARGS,
+    STARTER_HOME_SERVICE_DATA_DIR,
 )
 from env.environment import HomeServiceMode
 from env.sensors import RGBHomeServiceSensor, DepthHomeServiceSensor, RelativePositionChangeSensor, SubtaskHomeServiceSensor
 from env.tasks import HomeServiceTaskSampler
 
 
+def get_tasks(stage: str):
+    task_names_file = os.path.join(
+        STARTER_HOME_SERVICE_DATA_DIR,
+        stage,
+        "task_names.json.gz",
+    )
+    if os.path.exists(task_names_file):
+        print(f"Cached tasks file found at {task_names_file}, using this file.")
+        return compress_json.load(task_names_file)
+
+    tasks = list(
+        compress_pickle.load(
+            os.path.join(
+                STARTER_HOME_SERVICE_DATA_DIR,
+                f'{stage}.pkl.gz'
+            )
+        ).keys()
+    )
+    tasks = [
+        task.replace("train_", "").replace("val_", "").replace("test_", "")
+        for task in tasks
+    ]
+    compress_json.dump(tasks, task_names_file)
+
+    return tasks
+
+
+
 class HomeServiceBaseExperimentConfig(ExperimentConfig):
+    EXPERT_EXPLORATION_ENABLED = False
 
     # Task parameters
     MAX_STEPS = 500
@@ -79,6 +111,7 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
         "height": SCREEN_SIZE,
         "commit_id": PROCTHOR_COMMIT_ID,
         "fastActionEmit": True,
+        "scene": "Procedural",
         "renderDepthImage": True,
         "renderSemanticSegmentation": REFERENCE_SEGMENTATION,
         "renderInstanceSegmentation": REFERENCE_SEGMENTATION,
@@ -93,7 +126,7 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
     # Training parameters
     TRAINING_STEPS = int(25e6)
     SAVE_INTERVAL = int(1e5)
-    CNN_PREPROCESSOR_TYPE_AND_PRETRAINING: Optional[Tuple[str, str]] = None
+    CNN_PREPROCESSOR_TYPE_AND_PRETRAINING: Optional[Tuple[str, str]] = ("RN50", "clip")
     DEVICE = torch.device('cuda')
 
     # Model parameters
@@ -139,16 +172,15 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
         )
     )
 
-    @classmethod
-    def actions(cls):
+    def actions(self):
         done_actions = (
             tuple()
-            if not cls.REQUIRE_DONE_ACTION
+            if not self.REQUIRE_DONE_ACTION
             else ("done",)
         )
         other_move_actions = (
             tuple()
-            if not cls.INCLUDE_OTHER_MOVE_ACTIONS
+            if not self.INCLUDE_OTHER_MOVE_ACTIONS
             else ("move_left", "move_right", "move_back",)
         )
 
@@ -165,18 +197,17 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
                 "crouch",
                 "look_up",
                 "look_down",
-                *cls.PICKUP_ACTIONS,
-                *cls.OPEN_ACTIONS,
-                *cls.CLOSE_ACTIONS,
-                *cls.PUT_ACTIONS,
+                *self.PICKUP_ACTIONS,
+                *self.OPEN_ACTIONS,
+                *self.CLOSE_ACTIONS,
+                *self.PUT_ACTIONS,
             )
         )
 
-    @classmethod
-    def sensors(cls):
+    def sensors(self) -> Sequence[Sensor]:
         mean, stdev = None, None
-        if cls.CNN_PREPROCESSOR_TYPE_AND_PRETRAINING is not None:
-            cnn_type, pretraining_type = cls.CNN_PREPROCESSOR_TYPE_AND_PRETRAINING
+        if self.CNN_PREPROCESSOR_TYPE_AND_PRETRAINING is not None:
+            cnn_type, pretraining_type = self.CNN_PREPROCESSOR_TYPE_AND_PRETRAINING
             if pretraining_type.strip().lower() == "clip":
                 from allenact_plugins.clip_plugin.clip_preprocessors import (
                     ClipResNetPreprocessor,
@@ -195,36 +226,35 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
 
         sensors = [
             RGBHomeServiceSensor(
-                height=cls.SCREEN_SIZE,
-                width=cls.SCREEN_SIZE,
+                height=self.SCREEN_SIZE,
+                width=self.SCREEN_SIZE,
                 use_resnet_normalization=normalize,
-                uuid=cls.EGOCENTRIC_RGB_UUID,
+                uuid=self.EGOCENTRIC_RGB_UUID,
                 mean=mean,
                 stdev=stdev,
             ),
             DepthHomeServiceSensor(
-                height=cls.SCREEN_SIZE,
-                width=cls.SCREEN_SIZE,
+                height=self.SCREEN_SIZE,
+                width=self.SCREEN_SIZE,
                 use_normalization=False,
-                uuid=cls.DEPTH_UUID,
+                uuid=self.DEPTH_UUID,
             ),
         ]
 
         return sensors
     
-    @ classmethod
-    def create_resnet_builder(cls, in_uuid: str, out_uuid: str):
-        if cls.CNN_PREPROCESSOR_TYPE_AND_PRETRAINING is None:
+    def create_resnet_builder(self, in_uuid: str, out_uuid: str):
+        if self.CNN_PREPROCESSOR_TYPE_AND_PRETRAINING is None:
             raise NotImplementedError
-        cnn_type, pretraining_type = cls.CNN_PREPROCESSOR_TYPE_AND_PRETRAINING
+        cnn_type, pretraining_type = self.CNN_PREPROCESSOR_TYPE_AND_PRETRAINING
         if pretraining_type == "imagenet":
             assert cnn_type in [
                 "RN18",
                 "RN50",
             ], "Only allow using RN18/RN50 with `imagenet` pretrained weights."
             return ResNetPreprocessor(
-                input_height=cls.THOR_CONTROLLER_KWARGS["height"],
-                input_width=cls.THOR_CONTROLLER_KWARGS["width"],
+                input_height=self.THOR_CONTROLLER_KWARGS["height"],
+                input_width=self.THOR_CONTROLLER_KWARGS["width"],
                 output_width=7,
                 output_height=7,
                 output_dims=512 if "18" in cnn_type else 2048,
@@ -234,7 +264,7 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
                 ),
                 input_uuids=[in_uuid],
                 output_uuid=out_uuid,
-                device=cls.DEVICE
+                device=self.DEVICE
             )
         elif pretraining_type == "clip":
             from allenact_plugins.clip_plugin.clip_preprocessors import (
@@ -251,44 +281,46 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
                 clip_model_type=cnn_type,
                 pool=False,
                 output_uuid=out_uuid,
-                device=DEVICE
+                device=self.DEVICE
             )
         else:
             raise NotImplementedError
 
-    @classmethod
-    def preprocessors(cls) -> Sequence[Preprocessor]:
+    def preprocessors(self) -> Sequence[Preprocessor]:
         preprocessors = []
-        if cls.CNN_PREPROCESSOR_TYPE_AND_PRETRAINING is not None:
+        if self.CNN_PREPROCESSOR_TYPE_AND_PRETRAINING is not None:
             preprocessors.append(
-                cls.create_resnet_builder(
-                    in_uuid=cls.EGOCENTRIC_RGB_UUID,
-                    out_uuid=cls.EGOCENTRIC_RGB_RESNET_UUID,
+                self.create_resnet_builder(
+                    in_uuid=self.EGOCENTRIC_RGB_UUID,
+                    out_uuid=self.EGOCENTRIC_RGB_RESNET_UUID,
                 )
             )
         
         return preprocessors
 
-    @classmethod
-    def create_preprocessor_graph(cls, mode: str) -> SensorPreprocessorGraph:
+    def create_preprocessor_graph(self, mode: str) -> SensorPreprocessorGraph:
         additional_output_uuids = []
 
         return (
             None
-            if len(cls.preprocessors()) == 0
+            if len(self.preprocessors()) == 0
             else Builder(
                 SensorPreprocessorGraph,
                 {
-                    "source_observation_spaces": SensorSuite(cls.sensors()).observation_spaces,
-                    "preprocessors": cls.preprocessors(),
+                    "source_observation_spaces": SensorSuite(
+                        [
+                            sensor
+                            for sensor in self.sensors()
+                            if (mode == "train" or not isinstance(sensor, ExpertActionSensor))
+                        ]
+                    ).observation_spaces,
+                    "preprocessors": self.preprocessors(),
                     "additional_output_uuids": additional_output_uuids,
                 }
             )
         )
 
-    
-    @classmethod
-    def get_lr_scheduler_builder(cls, use_lr_decay: bool):
+    def get_lr_scheduler_builder(self, use_lr_decay: bool):
         return (
             None
             if not use_lr_decay
@@ -296,21 +328,20 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
                 LambdaLR,
                 {
                     "lr_lambda": LinearDecay(
-                        steps=cls.TRAINING_STEPS // 3, startp=1.0, endp=1.0 / 3
+                        steps=self.TRAINING_STEPS // 3, startp=1.0, endp=1.0 / 3
                     )
                 },
             )
         )
 
-    @classmethod
-    def machine_params(cls, mode="train", **kwargs) -> MachineParams:
+    def machine_params(self, mode="train", **kwargs) -> MachineParams:
         """Return the number of processes and gpu_ids to use with training."""
         num_gpus = cuda.device_count()
         has_gpu = num_gpus != 0
 
         sampler_devices = None
         if mode == "train":
-            nprocesses = cls.num_train_processes() if torch.cuda.is_available() else 1
+            nprocesses = self.num_train_processes() if torch.cuda.is_available() else 1
             devices = (
                 list(range(min(nprocesses, num_gpus)))
                 if has_gpu
@@ -318,9 +349,9 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
             )
         elif mode == "valid":
             devices = [num_gpus - 1] if has_gpu else [torch.device("cpu")]
-            nprocesses = cls.num_valid_processes() if has_gpu else 0
+            nprocesses = self.num_valid_processes() if has_gpu else 0
         else:
-            nprocesses = cls.num_test_processes() if has_gpu else 1
+            nprocesses = self.num_test_processes() if has_gpu else 1
             devices = (
                 list(range(min(nprocesses, num_gpus)))
                 if has_gpu
@@ -335,89 +366,82 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
             nprocesses=nprocesses,
             devices=devices,
             sampler_devices=sampler_devices,
-            sensor_preprocessor_graph=cls.create_preprocessor_graph(mode=mode),
+            sensor_preprocessor_graph=self.create_preprocessor_graph(mode=mode),
         )
 
-
-    @classmethod
     def make_sampler_fn(
-        cls,
+        self,
         stage: str,
         force_cache_reset: bool,
         seed: int,
-        allowed_task_keys: Optional[Sequence[str]] = None,
+        epochs: int,
+        allowed_tasks: Optional[Sequence[str]] = None,
         allowed_pickup_objs: Optional[Sequence[str]] = None,
-        allowed_start_receps: Optional[Sequence[str]] = None,
         allowed_target_receps: Optional[Sequence[str]] = None,
-        allowed_scene_inds: Optional[Sequence[int]] = None,
         x_display: Optional[str] = None,
         sensors: Optional[Sequence[Sensor]] = None,
         thor_controller_kwargs: Optional[Dict] = None,
-        runtime_sample: bool = False,
-        repeats_before_scene_change: int = 1,
         **kwargs,
     ) -> HomeServiceTaskSampler:
-        sensors = cls.sensors(stage) if sensors is None else sensors
+        sensors = self.sensors() if sensors is None else sensors
         if "mp_ctx" in kwargs:
             del kwargs["mp_ctx"]
 
-        if not runtime_sample:
-            return HomeServiceTaskSampler.from_fixed_simple_pick_and_place_data(
-                stage=stage,
-                allowed_task_keys=allowed_task_keys,
-                allowed_pickup_objs=allowed_pickup_objs,
-                allowed_start_receps=allowed_start_receps,
-                allowed_target_receps=allowed_target_receps,
-                allowed_scene_inds=allowed_scene_inds,
-                home_service_env_kwargs=dict(
-                    force_cache_reset=force_cache_reset,
-                    **cls.ENV_KWARGS,
-                    controller_kwargs={
-                        "x_display": x_display,
-                        **cls.THOR_CONTROLLER_KWARGS,
-                        "renderDepthImage": any(
-                            isinstance(s, DepthSensor) for s in sensors
-                        ),
-                        **(
-                            {} if thor_controller_kwargs is None else thor_controller_kwargs
-                        ),
-                    },
-                ),
-                seed=seed,
-                sensors=SensorSuite(sensors),
-                max_steps=cls.MAX_STEPS,
-                discrete_actions=cls.actions(),
-                smooth_nav=cls.SMOOTH_NAV,
-                smoothing_factor=cls.SMOOTHING_FACTOR,
-                require_done_action=cls.REQUIRE_DONE_ACTION,
-                force_axis_aligned_start=cls.FORCE_AXIS_ALIGNED_START,
-                randomize_start_rotation=(stage == "train"
-                and cls.RANDOMIZE_START_ROTATION_DURING_TRAINING),
-                **kwargs,
-            )
+        return HomeServiceTaskSampler.from_fixed_dataset(
+            stage=stage,
+            allowed_tasks=allowed_tasks,
+            allowed_pickup_objs=allowed_pickup_objs,
+            allowed_target_receps=allowed_target_receps,
+            home_service_env_kwargs=dict(
+                force_cache_reset=force_cache_reset,
+                **self.ENV_KWARGS,
+                controller_kwargs={
+                    "x_display": x_display,
+                    **self.THOR_CONTROLLER_KWARGS,
+                    "renderDepthImage": any(
+                        isinstance(s, DepthSensor) for s in sensors
+                    ),
+                    **(
+                        {} if thor_controller_kwargs is None else thor_controller_kwargs
+                    ),
+                },
+            ),
+            seed=seed,
+            sensors=SensorSuite(sensors),
+            max_steps=self.MAX_STEPS,
+            discrete_actions=self.actions(),
+            smooth_nav=self.SMOOTH_NAV,
+            smoothing_factor=self.SMOOTHING_FACTOR,
+            require_done_action=self.REQUIRE_DONE_ACTION,
+            force_axis_aligned_start=self.FORCE_AXIS_ALIGNED_START,
+            epochs=epochs,
+            expert_exploration_enabled=self.EXPERT_EXPLORATION_ENABLED,
+            **kwargs,
+        )
 
-    @classmethod
     def stagewise_task_sampler_args(
-        cls,
+        self,
         stage: str,
         process_ind: int,
         total_processes: int,
         headless: bool = False,
+        allowed_tasks: Optional[Sequence[str]] = None,
         allowed_pickup_objs: Optional[Sequence[str]] = None,
-        allowed_start_receps: Optional[Sequence[str]] = None,
         allowed_target_receps: Optional[Sequence[str]] = None,
-        allowed_scene_inds: Optional[Sequence[int]] = None,
         devices: Optional[List[int]] = None,
         seeds: Optional[List[int]] = None,
         deterministic_cudnn: bool = False,
     ):
-        task_keys = datagen_utils.get_task_keys(stage)
+        if allowed_tasks is not None:
+            tasks = allowed_tasks
+        else:
+            tasks = get_tasks(stage=stage)
 
-        allowed_task_keys = list(
-            sorted(partition_sequence(seq=task_keys, parts=total_processes,)[process_ind])
+        allowed_tasks = list(
+            sorted(partition_sequence(seq=tasks, parts=total_processes,)[process_ind])
         )
 
-        seed = md5_hash_str_as_int(str(task_keys))
+        seed = md5_hash_str_as_int(str(allowed_tasks))
 
         device = (
             devices[process_ind % len(devices)]
@@ -425,15 +449,10 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
             else torch.device("cpu")
         )
 
-        if allowed_scene_inds is None:
-            allowed_scene_inds = datagen_utils.get_scene_inds(stage)
-        else:
-            assert all([scene_ind in datagen_utils.get_scene_inds(stage) for scene_ind in allowed_scene_inds])
-
         x_display: Optional[str] = None
         gpu_device: Optional[int] = None
         thor_platform: Optional[ai2thor.platform.BaseLinuxPlatform] = None
-        if cls.HEADLESS:
+        if self.HEADLESS or headless:
             gpu_device = device
             thor_platform = ai2thor.platform.CloudRendering
 
@@ -462,11 +481,9 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
 
         kwargs = {
             "stage": stage,
-            "allowed_task_keys": allowed_task_keys,
+            "allowed_tasks": allowed_tasks,
             "allowed_pickup_objs": allowed_pickup_objs,
-            "allowed_start_receps": allowed_start_receps,
             "allowed_target_receps": allowed_target_receps,
-            "allowed_scene_inds": allowed_scene_inds,
             "seed": seed,
             "x_display": x_display,
             "thor_controller_kwargs": {
@@ -474,14 +491,13 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
                 "platform": thor_platform,
             },
         }
-        sensors = kwargs.get("sensors", copy.deepcopy(cls.sensors()))
+        sensors = kwargs.get("sensors", copy.deepcopy(self.sensors()))
         kwargs["sensors"] = sensors
 
         return kwargs
 
-    @classmethod
     def train_task_sampler_args(
-        cls,
+        self,
         process_ind: int,
         total_processes: int,
         devices: Optional[List[int]] = None,
@@ -492,8 +508,8 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
             force_cache_reset=False,
             epochs=float("inf"),
             task_spec_in_metrics=True,
-            **cls.stagewise_task_sampler_args(
-                stage="train_seen",
+            **self.stagewise_task_sampler_args(
+                stage="train",
                 process_ind=process_ind,
                 total_processes=total_processes,
                 devices=devices,
@@ -502,9 +518,8 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
             ),
         )
 
-    @classmethod
     def valid_task_sampler_args(
-        cls,
+        self,
         process_ind: int,
         total_processes: int,
         devices: Optional[List[int]] = None,
@@ -514,12 +529,8 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
         return dict(
             force_cache_reset=True,
             epochs=1,
-            **cls.stagewise_task_sampler_args(
-                stage="train_seen",
-                # allowed_pickup_objs=None,
-                # allowed_start_receps=None,
-                # allowed_target_receps=None,
-                allowed_scene_inds=(10, 20),
+            **self.stagewise_task_sampler_args(
+                stage="val",
                 process_ind=process_ind,
                 total_processes=total_processes,
                 devices=devices,
@@ -528,9 +539,8 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
             ),
         )
 
-    @classmethod
     def test_task_sampler_args(
-        cls,
+        self,
         process_ind: int,
         total_processes: int,
         devices: Optional[List[int]] = None,
@@ -540,18 +550,14 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
     ):
         task_spec_in_metrics = False
 
-        stage = "train_unseen"
+        stage = "test"
 
         return dict(
             force_cache_reset=True,
             epochs=1,
             task_spec_in_metrics=task_spec_in_metrics,
-            **cls.stagewise_task_sampler_args(
+            **self.stagewise_task_sampler_args(
                 stage=stage,
-                # allowed_pickup_objs=None,
-                # allowed_start_receps=None,
-                # allowed_target_receps=None,
-                allowed_scene_inds=range(29, 31),
                 process_ind=process_ind,
                 total_processes=total_processes,
                 devices=devices,
@@ -560,29 +566,24 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
             ),
         )
 
-    @classmethod
     @abstractmethod
-    def _training_pipeline_info(cls) -> Dict[str, Any]:
+    def _training_pipeline_info(self) -> Dict[str, Any]:
         raise NotImplementedError
 
-    @classmethod
     @abstractmethod
-    def num_train_processes(cls) -> int:
+    def num_train_processes(self) -> int:
         raise NotImplementedError
 
-    @classmethod
     @abstractmethod
-    def num_valid_processes(cls) -> int:
+    def num_valid_processes(self) -> int:
         raise NotImplementedError
 
-    @classmethod
     @abstractmethod
-    def num_test_processes(cls) -> int:
+    def num_test_processes(self) -> int:
         raise NotImplementedError
 
-    @classmethod
-    def training_pipeline(cls, **kwargs) -> TrainingPipeline:
-        info = cls._training_pipeline_info()
+    def training_pipeline(self, **kwargs) -> TrainingPipeline:
+        info = self._training_pipeline_info()
 
         return TrainingPipeline(
             gamma=info.get("gamma", 0.99),
@@ -592,37 +593,32 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
             num_mini_batch=info["num_mini_batch"],
             update_repeats=info["update_repeats"],
             max_grad_norm=info.get("max_grad_norm", 0.5),
-            save_interval=cls.SAVE_INTERVAL,
+            save_interval=self.SAVE_INTERVAL,
             named_losses=info["named_losses"],
-            metric_accumulate_interval=cls.num_train_processes()
-            * cls.MAX_STEPS
+            metric_accumulate_interval=self.num_train_processes()
+            * self.MAX_STEPS
             if torch.cuda.is_available()
             else 1,
             optimizer_builder=Builder(optim.Adam, dict(lr=info["lr"])),
             advance_scene_rollout_period=None,
             pipeline_stages=info["pipeline_stages"],
-            lr_scheduler_builder=cls.get_lr_scheduler_builder(
+            lr_scheduler_builder=self.get_lr_scheduler_builder(
                 use_lr_decay=info["use_lr_decay"]
             ),
         )
 
-    @classmethod
-    def create_model(cls, **kwargs) -> nn.Module:
-        if cls.CNN_PREPROCESSOR_TYPE_AND_PRETRAINING is None:
+    def create_model(self, **kwargs) -> nn.Module:
+        if self.CNN_PREPROCESSOR_TYPE_AND_PRETRAINING is None:
             return HomeServiceActorCriticSimpleConvRNN(
-                action_space=gym.spaces.Discrete(len(cls.actions())),
-                observation_space=SensorSuite(cls.sensors()).observation_spaces,
-                rgb_uuid=cls.EGOCENTRIC_RGB_UUID,
-                subtask_uuid="subtask",
-                rel_position_change_uuid="rel_position_change",
-                ordered_object_types=cls.ORDERED_OBJECT_TYPES
+                action_space=gym.spaces.Discrete(len(self.actions())),
+                observation_space=SensorSuite(self.sensors()).observation_spaces,
+                rgb_uuid=self.EGOCENTRIC_RGB_UUID,
+                ordered_object_types=self.ORDERED_OBJECT_TYPES
             )
         else:
             return HomeServiceResNetActorCriticRNN(
-                action_space=gym.spaces.Discrete(len(cls.actions())),
+                action_space=gym.spaces.Discrete(len(self.actions())),
                 observation_space=kwargs["sensor_preprocessor_graph"].observation_spaces,
-                rgb_uuid=cls.EGOCENTRIC_RGB_RESNET_UUID,
-                subtask_uuid="subtask",
-                rel_position_change_uuid="rel_position_change",
-                ordered_object_types=cls.ORDERED_OBJECT_TYPES
+                rgb_uuid=self.EGOCENTRIC_RGB_RESNET_UUID,
+                ordered_object_types=self.ORDERED_OBJECT_TYPES
             )
