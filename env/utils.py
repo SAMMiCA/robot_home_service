@@ -179,11 +179,11 @@ class ObjectInteractablePostionsCache:
             ), f"Scene names must match when filling a cache miss ({scene_name} != {cur_scene_name})."
 
             obj_in_scene = next(
-                (o for o in init_metadata["objects"] if o["name"] == obj["name"]), None,
+                (o for o in init_metadata["objects"] if o[key] == obj[key]), None,
             )
             if obj_in_scene is None:
                 raise RuntimeError(
-                    f"Object with name {obj['name']} must be in the scene when filling a cache miss"
+                    f"Object with name {obj[key]} must be in the scene when filling a cache miss"
                 )
 
             desired_pos = obj["position"]
@@ -424,6 +424,7 @@ def extract_obj_data(obj):
             "objectId": obj["objectId"],
             "name": obj["name"],
             "parentReceptacles": obj.get("parentReceptacles", []),
+            "receptacleObjectIds": obj.get("receptacleObjectIds", []),
         }
     return {
         "type": obj["objectType"],
@@ -435,6 +436,7 @@ def extract_obj_data(obj):
         "objectId": obj["objectId"],
         "name": obj["name"],
         "parentReceptacles": obj.get("parentReceptacles", []),
+        "receptacleObjectIds": obj.get("receptacleObjectIds", []),
         "bounding_box": obj["objectOrientedBoundingBox"]["cornerPoints"]
         if obj["objectOrientedBoundingBox"]
         else None,

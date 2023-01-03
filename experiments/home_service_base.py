@@ -197,6 +197,7 @@ class HomeServiceBaseExperimentConfig(ExperimentConfig):
                 "crouch",
                 "look_up",
                 "look_down",
+                "drop_held_object_with_snap",
                 *self.PICKUP_ACTIONS,
                 *self.OPEN_ACTIONS,
                 *self.CLOSE_ACTIONS,

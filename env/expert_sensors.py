@@ -15,7 +15,9 @@ if TYPE_CHECKING:
 else:
     SubTaskType = TypeVar("SubTaskType", bound="Task")
 from allenact.base_abstractions.sensor import AbstractExpertActionSensor
-from env.expert import ShortestPathNavigator, GreedySimpleHomeServiceExpert
+from allenact.utils.misc_utils import prepare_locals_for_super
+
+from env.expert import ShortestPathNavigator, HomeServiceGreedyActionExpert
 from env.environment import HomeServiceEnvironment
 from env.tasks import HomeServiceTask
 from env.constants import (
@@ -26,7 +28,7 @@ from env.constants import (
 )
 
 
-class GreedySimpleHomeServiceExpertSensor(AbstractExpertActionSensor):
+class HomeServiceGreedyActionExpertSensor(AbstractExpertActionSensor):
     def query_expert(
         self,
         task: HomeServiceTask,
@@ -34,8 +36,8 @@ class GreedySimpleHomeServiceExpertSensor(AbstractExpertActionSensor):
     ) -> Tuple[Any, bool]:
         env: HomeServiceEnvironment = task.env
         if (
-            not hasattr(task, "expert")
-            or task.expert is None
+            not hasattr(task, "action_expert")
+            or task.action_expert is None
         ):
             if (
                 not hasattr(env, "shortest_path_navigator")
@@ -43,14 +45,39 @@ class GreedySimpleHomeServiceExpertSensor(AbstractExpertActionSensor):
             ):
                 env.shortest_path_navigator = task.create_navigator()
             
-            task.expert = task.create_expert()
+            task.action_expert = task.create_greedy_expert()
 
-        action = task.expert.expert_action
+        action = task.action_expert.expert_action
         if action is None:
             return 0, False
         else:
             return action, True
 
+
+class HomeServiceSubtaskActionExpertSensor(AbstractExpertActionSensor):
+    def query_expert(
+        self,
+        task: HomeServiceTask,
+        expert_sensor_group_name: Optional[str]
+    ) -> Tuple[Any, bool]:
+        env: HomeServiceEnvironment = task.env
+        if (
+            not hasattr(task, "action_expert")
+            or task.action_expert is None
+        ):
+            if (
+                not hasattr(env, "shortest_path_navigator")
+                or env.shortest_path_navigator is None
+            ):
+                env.shortest_path_navigator = task.create_navigator()
+            
+            task.action_expert = task.create_subtask_expert()
+
+        action = task.action_expert.expert_action
+        if action is None:
+            return 0, False
+        else:
+            return action, True
 
 # class SubTaskExpertSensor(AbstractExpertActionSensor):
 #     def query_expert(

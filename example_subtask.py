@@ -1,39 +1,17 @@
 import copy
 import os
-import sys
 import random
 import numpy as np
-import stringcase
 import time
 
-from experiments.home_service_base import HomeServiceBaseExperimentConfig
-from experiments.home_service_il_clip_dagger import HomeServiceClipRN50DaggerDistributedConfig as Config
-from env.sensors import DepthHomeServiceSensor, RGBHomeServiceSensor
-from env.tasks import HomeServiceTaskSampler, HomeServiceTaskSpecIterable
-from env.environment import HomeServiceTaskSpec, HomeServiceMode, HomeServiceEnvironment
-from env.constants import (
-    STARTER_HOME_SERVICE_DATA_DIR,
-    STEP_SIZE,
-    VISIBILITY_DISTANCE,
-    ROTATION_ANGLE,
-    HORIZON_ANGLE,
-    SMOOTHING_FACTOR,
-    PROCTHOR_COMMIT_ID,
-    PICKUPABLE_OBJECTS,
-    OPENABLE_OBJECTS,
-    RECEPTACLE_OBJECTS,
-)
+from env.tasks import HomeServiceTaskSampler
+from env.environment import HomeServiceTaskSpec, HomeServiceEnvironment
 from allenact.utils.system import init_logging
-from allenact.base_abstractions.sensor import SensorSuite
-from allenact.base_abstractions.experiment_config import ExperimentConfig
-from allenact_plugins.clip_plugin.clip_preprocessors import (
-    ClipResNetPreprocessor,
-)
-from ai2thor.platform import CloudRendering
 
 
 def test_expert_base(
     stage: str = "train",
+    subtask: bool = True,
     skip_between_tasks: int = 0,
     random_action_prob: float = 0.0,
     explore: bool = True,
@@ -42,6 +20,10 @@ def test_expert_base(
     resume: bool = False,
     verbose: bool = True,
 ):
+    if subtask:
+        from experiments.home_service_il_clip_dagger_subtask import HomeServiceSubtaskClipRN50DaggerDistributedConfig as Config
+    else:
+        from experiments.home_service_il_clip_dagger import HomeServiceClipRN50DaggerDistributedConfig as Config
     config = Config(
         expert_exploration_enabled=explore,
         include_other_move_actions=include_other_move_actions
@@ -51,8 +33,8 @@ def test_expert_base(
         process_ind=0,
         total_processes=1,
         devices=[0, ],
-        # allowed_pickup_objs=["SoapBar"],
-        # allowed_target_receps=["Sink"],
+        # allowed_pickup_objs=["Pot"],
+        # allowed_target_receps=["Fridge"],
     )
     task_sampler: HomeServiceTaskSampler = config.make_sampler_fn(
         **task_sampler_params,
@@ -82,13 +64,17 @@ def test_expert_base(
         target_receptacles = []
         target_object_rooms = []
         target_receptacle_rooms = []
+
+        expert_actions = []
+        if subtask:
+            expert_subtasks = []
     
     if resume:
         import json
-        if not os.path.exists(f'test_expert_{stage}.json'):
+        if not os.path.exists(f'test_subtask_expert_{stage}.json'):
             raise FileNotFoundError
 
-        with open(f'test_expert_{stage}.json', 'r') as fp:
+        with open(f'test_subtask_expert_{stage}.json', 'r') as fp:
             loaded_result = json.load(fp)
         
         run_tasks = loaded_result["run_tasks"]
@@ -117,6 +103,10 @@ def test_expert_base(
         target_object_rooms.extend(loaded_result["target_object_rooms"])
         target_receptacle_rooms.extend(loaded_result["target_receptacle_rooms"])
 
+        expert_actions.extend(loaded_result["expert_actions"])
+        if subtask:
+            expert_subtasks.extend(loaded_result["expert_subtasks"])
+
         done_task_ids = copy.deepcopy(loaded_result["task_ids"])
         del loaded_result
 
@@ -134,18 +124,14 @@ def test_expert_base(
     start_time = time.time()
     total_length = task_sampler.length
     force_task_ids = {
-        # 'val__pick_and_place_WineBottle_SideTable__3__1',
-        # 'val__pick_and_place_WineBottle_SideTable__3__0',
-        # 'val__pick_and_place_WineBottle_GarbageCan__1__0',
+        # 'val__pick_and_place_WineBottle_CounterTop__3__1',
+        # 'val__pick_and_place_TissueBox_TVStand__4__0',
     }
-    # task_sampler.reset()
-    # for _ in range(620):
-    #     next(task_sampler.task_spec_iterator)
 
     while task_sampler.length > 0:
         print(f"======================== [ {run_tasks+1}-th task ] ========================")
         if resume:
-            task_spec = next(task_sampler.task_spec_iterator)
+            task_spec: HomeServiceTaskSpec = next(task_sampler.task_spec_iterator)
             while task_spec.unique_id in done_task_ids:
                 task_spec = next(task_sampler.task_spec_iterator)
             task = task_sampler.next_task(task_spec)
@@ -156,7 +142,6 @@ def test_expert_base(
             task = task_sampler.next_task(task_spec)
         else:
             task = task_sampler.next_task()
-
         if task is None:
             break
 
@@ -189,7 +174,6 @@ def test_expert_base(
                     ):
                         arrived_target_recep_room_for_scan = True
                         print(f"TARGET RECEP ROOM ARRIVED!")
-                        # import pdb; pdb.set_trace()
 
                     if (
                         task.env.current_room == task.env.target_object_room_id
@@ -198,7 +182,6 @@ def test_expert_base(
                     ):
                         arrived_target_object_room_for_scan = True
                         print(f"TARGET OBJECT ROOM ARRIVED AFTER FINDING TARGET RECEP!!!!!!!")
-                        # import pdb; pdb.set_trace()
 
                     if (
                         task.env.target_recep_id in task.action_expert.visited_recep_ids_per_room[task.env.target_recep_room_id]
@@ -206,7 +189,6 @@ def test_expert_base(
                     ):
                         found_target_recep_for_scan = True
                         print(f'TARGET RECEP Found!!')
-                        # import pdb; pdb.set_trace()
 
                     if (
                         task.env.target_object_id in task.action_expert.scanned_objects
@@ -253,7 +235,6 @@ def test_expert_base(
 
         metrics = task.metrics()
         task_lengths.append(len(task.action_expert.expert_action_list))
-        print(f"Task num_steps_taken: {task.num_steps_taken()}")
         if metrics["success"] == 1.0:
             successful_tasks += 1
             print("Expert Success")
@@ -284,7 +265,10 @@ def test_expert_base(
                         )
                     elif cp["broken"] and not gp["broken"]:
                         print(f"broken {gp['type']}")
-            # import pdb; pdb.set_trace()
+                
+            # import pdb; pdb.set_trace(header="Episode Failed")
+        
+        # import pdb; pdb.set_trace(header="Printed the RESULT")
 
         if save_result:
             tasks.append(task.env.current_task_spec.task)
@@ -302,6 +286,9 @@ def test_expert_base(
             target_receptacle_room_ids.append(task.env.target_recep_room_id)
             target_object_rooms.append(task.env.get_room_type(task.env.target_object_room_id))
             target_receptacle_rooms.append(task.env.get_room_type(task.env.target_recep_room_id))
+            expert_actions.append(metrics["expert_actions"])
+            if subtask:
+                expert_subtasks.append(metrics["expert_subtasks"])
         print(
             f"Ran tasks {run_tasks} Success rate: {successful_tasks / run_tasks * 100:.2f}%"
             f" length {np.mean(task_lengths):.2f} "
@@ -332,14 +319,17 @@ def test_expert_base(
                 "target_receptacle_room_ids": target_receptacle_room_ids,
                 "target_object_rooms": target_object_rooms,
                 "target_receptacle_rooms": target_receptacle_rooms,
+                "expert_actions": expert_actions
             }
+            if subtask:
+                result_dict["expert_subtasks"] = expert_subtasks
             
             print(f"SAVING RESULTS...")
             print(
                 f"Ran tasks {run_tasks}/{total_length} Success rate: {successful_tasks / run_tasks * 100:.2f}%"
                 f" length {np.mean(task_lengths):.2f} Remaining tasks {task_sampler.length}..."
             )
-            with open(f'test_expert_{stage}.json', 'w') as fp:
+            with open(f'test_subtask_expert_{stage}.json', 'w') as fp:
                 json.dump(result_dict, fp, sort_keys=False, indent=4)
 
             start_time = time.time()
@@ -370,7 +360,10 @@ def test_expert_base(
             "target_receptacle_room_ids": target_receptacle_room_ids,
             "target_object_rooms": target_object_rooms,
             "target_receptacle_rooms": target_receptacle_rooms,
+            "expert_actions": expert_actions,
         }
+        if subtask:
+            result_dict["expert_subtasks"] = expert_subtasks
         
         print(f"SAVING RESULTS...")
         print(
@@ -378,16 +371,16 @@ def test_expert_base(
             f" length {np.mean(task_lengths):.2f}"
         )
 
-        with open(f'test_expert_{stage}.json', 'w') as fp:
+        with open(f'test_subtask_expert_{stage}.json', 'w') as fp:
             json.dump(result_dict, fp, sort_keys=False, indent=4)
 
         start_time = time.time()
 
 
 init_logging("info")
-# init_logging("debug")
 test_expert_base(
     stage="test",
+    subtask=True,
     skip_between_tasks=0,
     random_action_prob=0.0,
     explore=True,

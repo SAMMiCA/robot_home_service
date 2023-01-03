@@ -62,6 +62,7 @@ conda env create --file environment.yml --name $MY_ENV_NAME
 conda activate rearrange2022
 
 # Download AI2-THOR binaries
-python -c "from ai2thor.controller import Controller; from ai2thor.platform import CloudRendering; from rearrange.constants import THOR_COMMIT_ID; c = Controller(platform=CloudRendering, commit_id=THOR_COMMIT_ID); c.stop()"
+# python -c "from ai2thor.controller import Controller; from ai2thor.platform import CloudRendering; from rearrange.constants import THOR_COMMIT_ID; c = Controller(platform=CloudRendering, commit_id=THOR_COMMIT_ID); c.stop()"
+python -c "from ai2thor.controller import Controller; from ai2thor.platform import CloudRendering; from env.constants import PROCTHOR_COMMIT_ID; c = Controller(platform=CloudRendering, commit_id=PROCTHOR_COMMIT_ID); c.stop()"
 
 echo DONE

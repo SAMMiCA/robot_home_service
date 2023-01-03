@@ -22,7 +22,8 @@ from env.environment import (
     HomeServiceTaskSpec,
 )
 from env.expert import (
-    GreedySimpleHomeServiceExpert,
+    HomeServiceGreedyActionExpert,
+    HomeServiceSubtaskActionExpert,
     ShortestPathNavigator,
 )
 from env.utils import (
@@ -30,7 +31,7 @@ from env.utils import (
     include_object_data,
     get_pose_info
 )
-
+from env.subtasks import HomeServiceSimpleSubtaskPlanner
 
 class AbstractHomeServiceTask(Task[HomeServiceEnvironment], ABC):
     @staticmethod
@@ -99,7 +100,7 @@ class HomeServiceTask(AbstractHomeServiceTask):
         self._took_end_action: bool = False
         self._obs = None
         
-        self.expert = None
+        self.action_expert = None
         self.actions_taken = []
         self.actions_taken_success = []
         self.agent_locs = [self.env.get_agent_location()]
@@ -113,11 +114,17 @@ class HomeServiceTask(AbstractHomeServiceTask):
             )
         )
 
-    def create_expert(self):
-        return GreedySimpleHomeServiceExpert(
+    def create_greedy_expert(self):
+        return HomeServiceGreedyActionExpert(
             task=self,
             shortest_path_navigator=self.env.shortest_path_navigator,
             exploration_enabled=self.expert_exploration_enabled,
+        )
+
+    def create_subtask_expert(self):
+        return HomeServiceSubtaskActionExpert(
+            task=self,
+            shortest_path_navigator=self.env.shortest_path_navigator,
         )
     
     @property
@@ -136,13 +143,69 @@ class HomeServiceTask(AbstractHomeServiceTask):
 
         env = self.env
         ips, gps, cps = env.poses
+        start_energies = env.pose_difference_energy(gps, ips)
+        end_energies = env.pose_difference_energy(gps, cps)
+        start_energy = start_energies.sum()
+        end_energy = end_energies.sum()
+        change_energies = env.pose_difference_energy(ips, cps)
+        change_energy = change_energies.sum()
 
         metrics = super().metrics()
         
         task_info = metrics["task_info"]
         task_info["scene"] = self.env.scene
+        task_info["target_object"] = self.env.target_object_id
+        task_info["target_receptacle"] = self.env.target_recep_id
+        if self.task_spec_in_metrics:
+            task_info["task_spec"] = {**self.env.current_task_spec.__dict__}
+            task_info["poses"] = self.env.poses
+            task_info["gps_vs_cps"] = self.env.compare_poses(gps, cps)
+            task_info["ips_vs_cps"] = self.env.compare_poses(ips, cps)
+            task_info["gps_vs_ips"] = self.env.compare_poses(gps, ips)
+
+        task_info["actions"] = self.actions_taken
+        task_info["action_successes"] = self.actions_taken_success
+        task_info["unique_id"] = self.env.current_task_spec.unique_id
         
         # TODO: Implement metrics
+        put_success = False
+        target_object = next(
+            cp for cp in cps if cp["objectId"] == self.env.target_object_id
+        )
+
+        try:
+            metrics["success"] = (
+                float(end_energy == 0)
+                or (
+                    target_object["parentReceptacles"] is not None
+                    and self.env.target_recep_id in target_object["parentReceptacles"]
+                )
+            )
+        except:
+            import pdb; pdb.set_trace()
+        metrics["start_energy"] = start_energy
+        metrics["end_energy"] = end_energy
+        metrics["change_energy"] = change_energy
+
+        if self.action_expert is not None:
+            metrics["expert_actions"] = copy.deepcopy(
+                [
+                    self.action_names()[expert_action]
+                    for expert_action in self.action_expert.expert_action_list[:-1]
+                ]
+            )
+
+        if (
+            self.action_expert is not None
+            and hasattr(self.action_expert, "planner")
+            and self.action_expert.planner is not None
+        ):
+            metrics["expert_subtasks"] = copy.deepcopy(
+                [
+                    self.action_expert.planner.subtask_str(expert_subtask)
+                    for expert_subtask in self.action_expert.expert_subtask_list
+                ]
+            )
 
         return metrics
 
@@ -271,7 +334,6 @@ class HomeServiceTask(AbstractHomeServiceTask):
                         self.env.controller.step(
                             "CloseObject",
                             objectId=obj_id,
-                            openness=1.0,
                             **self.env.physics_step_kwargs,
                         )
                         action_success = self.env.last_event.metadata["lastActionSuccess"]
@@ -418,13 +480,18 @@ class HomeServiceTask(AbstractHomeServiceTask):
         if self.task_spec_in_metrics:
             self.agent_locs.append(self.env.get_agent_location())
 
+        if self.action_expert is not None:
+            self.action_expert.update(
+                action_taken=action,
+                action_success=action_success,
+            )
+
         reward = self._judge(
             obs=self._obs,      # s0
             action=action,      # a0
             next_obs=self.get_observations(),      # s1
             action_success=action_success,
         )
-        # self.rewards.append(reward)
 
         # self._obs is updated
         return RLStepResult(
@@ -440,10 +507,10 @@ class HomeServiceTask(AbstractHomeServiceTask):
 
     def step(self, action: int) -> RLStepResult:
         step_result = super().step(action=action)
-        if self.expert is not None:
-            self.expert.update(
-                action_taken=action, action_success=step_result.info["action_success"]
-            )
+        # if self.expert is not None:
+        #     self.expert.update(
+        #         action_taken=action, action_success=step_result.info["action_success"]
+        #     )
         step_result = RLStepResult(
             observation=step_result.observation,
             reward=step_result.reward,
@@ -623,7 +690,9 @@ class HomeServiceTaskSpecIterable:
                 if len(self.remaining_tasks) == 0:
                     self.refresh_remaining_tasks()
                 self.current_task = self.remaining_tasks.pop()
-                self.houses_to_task_spec_dicts_for_current_task = self.tasks_to_houses_to_task_spec_dicts[self.current_task]
+                self.houses_to_task_spec_dicts_for_current_task = copy.deepcopy(
+                    self.tasks_to_houses_to_task_spec_dicts[self.current_task]
+                )
 
             if len(self.remaining_houses) == 0:
                 self.refresh_remaining_houses()

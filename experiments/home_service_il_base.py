@@ -11,7 +11,7 @@ from allenact.utils.system import get_logger
 from allenact.utils.misc_utils import all_unique
 from allenact.utils.experiment_utils import PipelineStage
 from env.tasks import HomeServiceTaskSampler
-from env.expert_sensors import GreedySimpleHomeServiceExpertSensor
+from env.expert_sensors import HomeServiceGreedyActionExpertSensor
 from experiments.home_service_base import HomeServiceBaseExperimentConfig
 
 
@@ -77,14 +77,6 @@ def il_training_params(label: str, training_steps: int, square_root_scaling=Fals
 class HomeServiceILBaseExperimentConfig(HomeServiceBaseExperimentConfig):
     IL_PIPELINE_TYPE: Optional[str] = None
     square_root_scaling = False
-
-    def sensors(self) -> Sequence[Sensor]:
-        return [
-            GreedySimpleHomeServiceExpertSensor(
-                action_space=len(self.actions()),
-            ),
-            *super().sensors(),
-        ]
 
     def _training_pipeline_info(self, **kwargs) -> Dict[str, Any]:
         training_steps = self.TRAINING_STEPS

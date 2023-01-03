@@ -8,12 +8,11 @@ from allenact.base_abstractions.experiment_config import (
 )
 from allenact.base_abstractions.sensor import Sensor, SensorSuite
 
-from env.expert_sensors import HomeServiceGreedyActionExpertSensor
-
+from env.expert_sensors import HomeServiceSubtaskActionExpertSensor
 from experiments.home_service_il_base import HomeServiceILBaseExperimentConfig as Base
 
 
-class HomeServiceClipRN50DaggerDistributedConfig(Base):
+class HomeServiceSubtaskClipRN50DaggerDistributedConfig(Base):
     def __init__(
         self,
         distributed_nodes: int = 1,
@@ -49,7 +48,7 @@ class HomeServiceClipRN50DaggerDistributedConfig(Base):
 
     def sensors(self) -> Sequence[Sensor]:
         return [
-            HomeServiceGreedyActionExpertSensor(
+            HomeServiceSubtaskActionExpertSensor(
                 action_space=len(self.actions()),
                 uuid="expert_action",
             ),
@@ -57,7 +56,7 @@ class HomeServiceClipRN50DaggerDistributedConfig(Base):
         ]
 
     def tag(self) -> str:
-        return f"HomeServiceClipRN50DaggerDistributed{self.distributed_nodes}_{self.IL_PIPELINE_TYPE}_{self.TRAINING_STEPS // int(1e6)}Msteps_{self.RNN_LAYERS}layers_{self.RNN_TYPE}"
+        return f"HomeServiceSubtaskClipRN50DaggerDistributed{self.distributed_nodes}_{self.IL_PIPELINE_TYPE}_{self.TRAINING_STEPS // int(1e6)}Msteps_{self.RNN_LAYERS}layers_{self.RNN_TYPE}"
 
     def machine_params(self, mode="train", **kwargs) -> MachineParams:
         assert (

@@ -25,6 +25,7 @@ import stringcase
 from torch.distributions.utils import lazy_property
 
 from allenact.utils.system import get_logger
+from allenact.utils.misc_utils import prepare_locals_for_super
 from allenact_plugins.ithor_plugin.ithor_environment import IThorEnvironment
 from allenact_plugins.ithor_plugin.ithor_util import (
     round_to_factor,
@@ -35,6 +36,7 @@ from env.environment import (
     HomeServiceEnvironment,
     HomeServiceMode,
 )
+from env.subtasks import SUBTASKS, HomeServiceSimpleSubtaskPlanner
 
 if TYPE_CHECKING:
     from env.tasks import HomeServiceTask
@@ -452,43 +454,54 @@ class ShortestPathNavigator:
         return dict(x=x, y=y, z=z, rotation=rot, horizon=hor, standing=standing)
 
 
-class GreedySimpleHomeServiceExpert:
-    """An agent which greedily attempts to complete a given unshuffle task."""
+class HomeServiceGreedyActionExpert:
+    """An agent which greedily attempts to complete a given task."""
 
     def __init__(
         self,
         task: "HomeServiceTask",
         shortest_path_navigator: ShortestPathNavigator,
-        max_priority_per_object: int = 3,
-        max_priority_per_receptacle: int = 3,
-        steps_for_time_pressure: int = 200,
+        max_priority: int = 3,
+        steps_for_time_pressure: int = 250,
         exploration_enabled: bool = True,
-        scan_before_move: bool = True,
+        **kwargs,
     ):
         get_logger().debug(
             f"Expert started for {task.env.scene} (exploration: {exploration_enabled})"
         )
         self.exploration_enabled = exploration_enabled
-        self.scan_before_move = scan_before_move
 
         self.task = task
         assert self.task.num_steps_taken() == 0
 
         self.shortest_path_navigator = shortest_path_navigator
-        self.max_priority_per_object = max_priority_per_object
 
         self._last_to_target_recep_id: Optional[str] = None
         self.scanned_receps = set()
         self._current_object_target_keys: Optional[Set[AgentLocKeyType]] = None
         self.recep_id_loc_per_room = dict()
         self.cached_locs_for_recep = dict()
+        self.scanned_objects = set()
+        self.object_id_loc_per_recep_id = dict()
+        self.cached_locs_for_objects = dict()
 
-        self.max_priority_per_receptacle = max_priority_per_receptacle
-        self.recep_id_to_priority: defaultdict = defaultdict(lambda: 0)
+        self.max_priority = max_priority
+        self.obj_id_to_priority: defaultdict = defaultdict(lambda: 0)
         self.visited_recep_ids_per_room = {
             room: set() for room in self.env.room_to_poly
         }
         self.unvisited_recep_ids_per_room = self.env.room_to_static_receptacle_ids()
+        self.visited_object_ids_per_recep = {
+            recep: set()
+            for room in self.env.room_to_poly
+            for recep in self.unvisited_recep_ids_per_room[room]
+        }
+        self.unvisited_object_ids_per_recep = {
+            recep: set(obj["receptacleObjectIds"])
+            for recep in self.visited_object_ids_per_recep
+            for obj in self.env.objects()
+            if obj["objectId"] == recep
+        }
 
         self.steps_for_time_pressure = steps_for_time_pressure
 
@@ -499,7 +512,6 @@ class GreedySimpleHomeServiceExpert:
         self._last_held_object_id: Optional[str] = None
         self._last_to_interact_object_pose: Optional[Dict[str, Any]] = None
         self._id_of_object_we_wanted_to_pickup: Optional[str] = None
-        self.object_id_to_priority: defaultdict = defaultdict(lambda: 0)
 
         self.shortest_path_navigator.on_reset()
         self.update(action_taken=None, action_success=None)
@@ -520,7 +532,7 @@ class GreedySimpleHomeServiceExpert:
         `self.task.action_names()`. For this action to be available the
         `update` function must be called after every step.
         """
-        assert self.task.num_steps_taken() == len(self.expert_action_list) - 1
+        # assert self.task.num_steps_taken() == len(self.expert_action_list) - 1
         return self.expert_action_list[-1]
 
     '''
@@ -562,7 +574,7 @@ class GreedySimpleHomeServiceExpert:
         ):
             try:
                 action = shortest_path_navigator.shortest_path_next_action(
-                    source_state_key=source_state_key, target_key=target_key,
+                    source_state_key=source_state_key, goal_state_key=target_key,
                 )
             except nx.NetworkXNoPath as _:
                 action = None
@@ -672,7 +684,7 @@ class GreedySimpleHomeServiceExpert:
     ) -> List[Dict[str, Union[float, int, bool]]]:
         # Try to find an interactable positions for all objects on objs_on_recep
         interactable_positions = self._try_to_interact_with_objs_on_recep(
-            self.env,
+            obj["objectId"],
             interactable_positions,
             objs_on_recep,      # modified in-place
             force_horizon,
@@ -717,9 +729,35 @@ class GreedySimpleHomeServiceExpert:
 
     def uncovered_ids_on_recep(self, recep_obj, max_objs_to_check=6):
         return set(recep_obj["receptacleObjectIds"][:max_objs_to_check])
+    
+    def update_visited_receps(self, horizon: int = 30):
+        if self.env.current_room is None:
+            if self.env._last_room_id is not None:
+                rooms_to_check = [self.env._last_room_id]
+            else:
+                return
+        else:
+            rooms_to_check = [self.env.current_room]
+
+        get_logger().debug(
+            f"rooms to check during updating visited receps: {rooms_to_check} "
+        )
+        for room in rooms_to_check:
+            if room not in self.recep_id_loc_per_room:
+                recep_ids = self.unvisited_recep_ids_per_room[room]
+                self.recep_id_loc_per_room[room] = self.env.object_ids_with_locs(
+                    list(recep_ids)
+                )
+        
+        self.get_unscanned_receps(
+            rooms_to_check=rooms_to_check,
+            horizon=horizon,
+            standing=True,
+        )
 
     def get_unscanned_receps(self, rooms_to_check, standing=True, horizon=30):
-        agent_key = self.shortest_path_navigator.get_key(self.env.get_agent_location())
+        # agent_key = self.shortest_path_navigator.get_key(self.env.get_agent_location())
+        agent_key = self.shortest_path_navigator.get_full_key(self.env.get_agent_location())
         all_objects = self.env.objects()
 
         for room in rooms_to_check:
@@ -746,6 +784,45 @@ class GreedySimpleHomeServiceExpert:
                         force_horizon=horizon,
                         objs_on_recep=uncovered.copy(),
                     )
+                    if needs_action is None:
+                        self._expert_nav_action_to_obj(
+                            current_recep,
+                            objs_on_recep=uncovered,
+                        )
+                        if len(self._current_object_target_keys):
+                            get_logger().debug(
+                                f"Access {current_recep_id} by underconstraining the agent pose"
+                            )
+                    
+                    get_logger().debug(
+                        f"Update cached_locs_for_recep[{current_recep['objectId']}]"
+                    )
+                    self.cached_locs_for_recep[current_recep["objectId"]] = self._current_object_target_keys
+
+                if agent_key in self.cached_locs_for_recep[current_recep["objectId"]]:
+                    get_logger().debug(
+                        f"Agent is located nearby [{current_recep['objectId']}]"
+                    )
+                    self.visited_recep_ids_per_room[room].add(current_recep_id)
+                    self.scanned_receps.add(current_recep_id)
+                    self.unvisited_recep_ids_per_room[room].remove(current_recep_id)
+                    if current_recep_id == self._last_to_target_recep_id:
+                        self._last_to_target_recep_id = None
+
+                    for obj in uncovered:
+                        if (
+                            obj in self.cached_locs_for_objects
+                            and agent_key in self.cached_locs_for_objects[obj]
+                        ):
+                            get_logger().debug(
+                                f"Agent is located nearby [{obj}]"
+                            )
+                            if obj not in self.visited_object_ids_per_recep[current_recep['objectId']]:
+                                self.visited_object_ids_per_recep[current_recep['objectId']].add(obj)
+                            if obj not in self.scanned_objects:
+                                self.scanned_objects.add(obj)
+                            if obj in self.unvisited_object_ids_per_recep[current_recep['objectId']]:
+                                self.unvisited_object_ids_per_recep[current_recep['objectId']].remove(obj)
 
     def current_direction(self):
         agent_rot = self.env.last_event.metadata["agent"]["rotation"]["y"] % 360
@@ -759,17 +836,62 @@ class GreedySimpleHomeServiceExpert:
             direction = (0, -1)
         return direction
 
+    def time_pressure(self):
+        if self.task.num_steps_taken() == self.steps_for_time_pressure:
+            get_logger().debug(
+                f"Expert rushing due to time pressure ({self.steps_for_time_pressure} steps)"
+            )
+        return self.task.num_steps_taken() >= self.steps_for_time_pressure
+
     def _log_output_mode(self, expert_mode: str, action_dict: Dict[str, Any]) -> Dict[str, Any]:
         if self.last_expert_mode != expert_mode:
-            get_logger().debug(f"{expert_mode} mode")
+            get_logger().debug(f"Change mode from [{self.last_expert_mode}] to [{expert_mode}]")
             self.last_expert_mode = expert_mode
         return action_dict
 
-    def prioritize_receps(self):
-        agent_loc = self.env.get_agent_location()
+    def _try_to_interact_with_objs_on_recep(
+        self,
+        recep_obj_id: str,
+        interactable_positions: List[Dict[str, Union[float, int, bool]]],
+        objs_on_recep: Set[str],
+        horizon: int,
+        standing: bool,
+    ) -> List[Dict[str, Union[float, int, bool]]]:
+        env = self.env
+        # Try to (greedily) find an interactable positions for all/most objects on objs_on_recep
+        last_interactable = interactable_positions
+        missing_objs_on_recep = copy.copy(objs_on_recep)
+        if recep_obj_id not in self.object_id_loc_per_recep_id:
+            self.object_id_loc_per_recep_id[recep_obj_id] = self.env.object_ids_with_locs(missing_objs_on_recep)
+        for obj_id in missing_objs_on_recep:
+            obj = next((o for o in env.objects() if o["objectId"] == obj_id), None)
+            if obj is None:
+                continue
+            new_interactable = env._interactable_positions_cache.get(
+                scene_name=env.scene,
+                obj=obj,
+                controller=env,
+                reachable_positions=HomeServiceGreedyActionExpert.extract_xyz(
+                    last_interactable
+                ),
+                force_horizon=horizon,
+                force_standing=standing,
+                avoid_teleport=True,
+            )
+            if len(new_interactable) > 0:
+                objs_on_recep.remove(obj_id)
+                get_logger().debug(
+                    f"Update cached_locs_for_objects[{obj_id}]"
+                )
+                self.cached_locs_for_objects[obj_id] = set(
+                    [
+                        self.shortest_path_navigator.get_full_key(loc)
+                        for loc in new_interactable
+                    ]
+                )
+                last_interactable = new_interactable
 
-        assert self.env.current_room is not None
-        recep_ids = self.unvisited_recep_ids_per_room[self.env.current_room]
+        return last_interactable
 
     def _invalidate_interactable_loc_for_pose(
         self, location: Dict[str, Any], obj_pose: Dict[str, Any]
@@ -779,7 +901,7 @@ class GreedySimpleHomeServiceExpert:
         env = self.task.env
 
         interactable_positions = env._interactable_positions_cache.get(
-            scene_name=env.scene, obj=obj_pose, controller=env.controller
+            scene_name=env.scene, obj=obj_pose, controller=env
         )
         for i, loc in enumerate([*interactable_positions]):
             if (
@@ -795,23 +917,66 @@ class GreedySimpleHomeServiceExpert:
         if self.env.held_object is None:
             return None
 
-        self._last_to_interact_object_pose = None
+        get_logger().debug(
+            f"In `manage_held_object` method..."
+        )
+        # self._last_to_interact_object_pose = None
 
         # Should navigate to a position where the held object can be placed
-        expert_nav_action = self._expert_nav_action_to_obj(
-            obj={
-                **self.env.held_object,
-                **{
-                    k: self.env.object_id_to_target_pose[
-                        self.env.held_object["objectId"]
-                    ][k]
-                    for k in ["position", "rotation"]
-                },
+        self._last_to_interact_object_pose = {
+            **self.env.held_object,
+            **{
+                k: self.env.object_id_to_target_pose[
+                    self.env.held_object["objectId"]
+                ][k]
+                for k in ["position", "rotation"]
             },
+        }
+        expert_nav_action = self._expert_nav_action_to_obj(
+            obj=self._last_to_interact_object_pose
         )
+        if self.env.held_object["objectId"] == self.env.target_object_id:
+            if (
+                self.exploration_enabled
+                and self.env.target_recep_id not in self.cached_locs_for_recep
+            ):
+                get_logger().debug(
+                    f"WARNING: Target receptacle is not observed. Scan it first!"
+                    f"Move to the start pose of the held object!"
+                )
+                # move held object to initial position
+                expert_nav_action = self._expert_nav_action_to_obj(
+                    obj={
+                        **self.env.held_object,
+                        **{
+                            k: self.env.object_id_to_start_pose[
+                                self.env.held_object["objectId"]
+                            ][k]
+                            for k in ["position", "rotation"]
+                        },
+                    },
+                )
+            elif self.env.current_room != self.env.target_recep_room_id:
+                get_logger().debug(
+                    f"The agent is not in target recep room."
+                )
+                return self.move_to_target_recep_room()
+            # elif self.exploration_enabled:
+            #     # move to target recep
+            #     target_recep = next(
+            #         o for o in self.env.objects() if o["objectId"] == self.env.target_recep_id
+            #     )
+            #     self._last_to_interact_object_pose = target_recep
+            #     expert_nav_action = self._expert_nav_action_to_obj(
+            #         self._last_to_interact_object_pose,
+            #         # recep_target_keys=self.cached_locs_for_recep[self.env.target_recep_id]
+            #     )
 
         if expert_nav_action is None:
             # Could not find a path to the target,
+            get_logger().debug(
+                f"Drop held object"
+            )
             return dict(action="DropHeldObjectWithSnap")
         elif expert_nav_action == "Pass":
             # We're in a position where we can put the object
@@ -819,6 +984,9 @@ class GreedySimpleHomeServiceExpert:
             if parent_ids is not None and len(parent_ids) == 1:
                 parent_type = stringcase.pascalcase(
                     self.env.object_id_to_target_pose[parent_ids[0]]["objectType"]
+                )
+                get_logger().debug(
+                    f"Returning dict(action=Put{parent_type}"
                 )
                 return dict(action=f"Put{parent_type}")
             else:
@@ -833,6 +1001,9 @@ class GreedySimpleHomeServiceExpert:
         if action_taken is not None:
             assert action_success is not None
 
+            get_logger().debug(
+                f"STEP-{self.task.num_steps_taken()}: action[{self.task.action_names()[action_taken]}({action_taken})] action_success[{action_success}]"
+            )
             action_names = self.task.action_names()
             last_expert_action = self.expert_action_list[-1]
             agent_took_expert_action = action_taken == last_expert_action
@@ -843,13 +1014,13 @@ class GreedySimpleHomeServiceExpert:
             if "pickup_" in action_str and agent_took_expert_action and action_success:
                 self._id_of_object_we_wanted_to_pickup = self._last_to_interact_object_pose["objectId"]
 
-            if "put_" in action_str and agent_took_expert_action and action_success:
+            if ("put_" in action_str or "drop_held" in action_str) and agent_took_expert_action and action_success:
                 if self._id_of_object_we_wanted_to_pickup is not None:
-                    self.object_id_to_priority[
+                    self.obj_id_to_priority[
                         self._id_of_object_we_wanted_to_pickup
                     ] += 1
                 else:
-                    self.object_id_to_priority[
+                    self.obj_id_to_priority[
                         self._last_held_object_id
                     ] += 1
 
@@ -865,9 +1036,14 @@ class GreedySimpleHomeServiceExpert:
                     "pickup_" in action_str 
                     or "open_by_type" in action_str 
                     or "close_by_type" in action_str 
-                    or "put_by_type" in action_str
+                    or "put_" in action_str
                 ) and action_taken == last_expert_action:
                     assert self._last_to_interact_object_pose is not None
+                    get_logger().debug(
+                        f"Action {action_str} FAILED. "
+                        f"Invalidate current location [{self.task.env.get_agent_location()}] "
+                        f"for object pose [{self._last_to_interact_object_pose}]."
+                    )
                     self._invalidate_interactable_loc_for_pose(
                         location=self.task.env.get_agent_location(),
                         obj_pose=self._last_to_interact_object_pose,
@@ -882,7 +1058,8 @@ class GreedySimpleHomeServiceExpert:
                     agent_loc["standing"] = not agent_loc["standing"]
                     self._invalidate_interactable_loc_for_pose(
                         location=agent_loc,
-                        obj_pose=self.task.env.object_id_to_target_pose[held_object_id],
+                        # obj_pose=self.task.env.object_id_to_target_pose[held_object_id],
+                        obj_pose=self._last_to_interact_object_pose,
                     )
 
             else:
@@ -902,15 +1079,15 @@ class GreedySimpleHomeServiceExpert:
     def _generate_and_record_expert_action(self):
         """Generate the next greedy expert action and save it to the
         `expert_action_list`."""
-        if self.task.num_steps_taken() == len(self.expert_action_list) + 1:
-            get_logger().warning(
-                f"Already generated the expert action at step {self.task.num_steps_taken()}"
-            )
-            return
+        # if self.task.num_steps_taken() == len(self.expert_action_list) + 1:
+        #     get_logger().warning(
+        #         f"Already generated the expert action at step {self.task.num_steps_taken()}"
+        #     )
+        #     return
 
-        assert self.task.num_steps_taken() == len(
-            self.expert_action_list
-        ), f"{self.task.num_steps_taken()} != {len(self.expert_action_list)}"
+        # assert self.task.num_steps_taken() == len(
+        #     self.expert_action_list
+        # ), f"{self.task.num_steps_taken()} != {len(self.expert_action_list)}"
         expert_action_dict = self._generate_expert_action_dict()
         if expert_action_dict is None:
             self.expert_action_list.append(None)
@@ -924,7 +1101,7 @@ class GreedySimpleHomeServiceExpert:
             )
             obj_type = stringcase.snakecase(current_obj["objectType"])
             action_str = f"{action_str}_{obj_type}"
-
+            
         try:
             self.expert_action_list.append(self.task.action_names().index(action_str))
         except ValueError:
@@ -947,22 +1124,33 @@ class GreedySimpleHomeServiceExpert:
                 return self._log_output_mode("held object", attempt)
             
             if self.exploration_enabled:
-                # ppap
+                self.update_visited_receps(horizon=horizon)
+
                 if not self.time_pressure():
-                    attempt = self.home_service_pickup(mode="")
+                    # Try to pickup the target object
+                    attempt = self.home_service_pickup(mode="causal")
                     if attempt is not None:
-                        return self._log_output_mode("", attempt)
+                        return self._log_output_mode("home_service_pickup (causal)", attempt)
                     
-                    # 
-            attempt = self.home_service_pickup(mode="")
+                    # Try to scan for recep
+                    attempt = self.scan_for_target_object(horizon=horizon)
+                    if attempt is not None:
+                        return self._log_output_mode("scan object", attempt)
+
+                    # Try to scan for recep
+                    attempt = self.scan_for_target_recep(horizon=horizon)
+                    if attempt is not None:
+                        return self._log_output_mode("scan recep", attempt)
+
+            attempt = self.home_service_pickup(mode="whole")
             if attempt is not None:
-                return self._log_output_mode("", attempt)
+                return self._log_output_mode("home_service_pickup (whole)", attempt)
 
             if self.exploration_enabled:
-                if self.env.target_room_id != self.env.current_house:
+                if self.env.target_recep_room_id != self.env.current_room:
                     get_logger().debug(
-                        f"WARNING: We cannot generate more actions despite being in {self.env.current_house},"
-                        f" away from the target {self.env.target_room_id}. Terminating"
+                        f"WARNING: We cannot generate more actions despite being in {self.env.current_room},"
+                        f" away from the target {self.env.target_recep_room_id}. Terminating"
                     )
             
             return dict(action="Done")
@@ -973,16 +1161,537 @@ class GreedySimpleHomeServiceExpert:
             get_logger().debug(f"EXCEPTION: Expert failure: {traceback.format_exc()}")
             return None
 
-    def scan_for_target_recep(self, standing=True, horizon=30):
+    def pose_action_if_compatible(
+        self,
+        nav_action: str,
+        pose_action: Optional[Dict[str, Any]],
+        horizon: int,
+        current_recep: Optional[Dict[str, Any]] = None,
+        standing: bool = None,
+        room_id: Optional[str] = None,
+    ):
+        assert (current_recep is None) != (room_id is None)
+        get_logger().debug(
+            f"In `pose_action_if_compatible` method..."
+            f"nav_action: {nav_action}, pose_action: {pose_action}"
+        )
+
+        if pose_action is None:
+            get_logger().debug(
+                f"Returning nav_action: {nav_action} as pose_action is None"
+            )
+            return nav_action
+        
+        future_agent_loc = self.env.get_agent_location()
+        
+        if pose_action["action"] == "Stand":
+            future_agent_loc["standing"] = True
+            incompatible_action = "Crouch"
+        elif pose_action["action"] == "LookUp":
+            future_agent_loc["horizon"] -= 30
+            incompatible_action = "LookDown"
+        elif pose_action["action"] == "LookDown":
+            future_agent_loc["horizon"] += 30
+            incompatible_action = "LookUp"
+
+        get_logger().debug(
+            f"future_agent_loc: {future_agent_loc}"
+        )
+        
+        if current_recep is not None:
+            future_nav_action = self._expert_nav_action_to_obj(
+                current_recep,
+                force_standing=standing,
+                force_horizon=horizon,
+                future_agent_loc=future_agent_loc,
+                recep_target_keys=self.cached_locs_for_recep[current_recep["objectId"]],
+            )
+        else:
+            future_nav_action = self._expert_nav_action_to_room(
+                cast(str, room_id),
+                horizon=horizon,
+                future_agent_loc=future_agent_loc,
+            )
+        
+        get_logger().debug(
+            f"future_nav_action: {future_nav_action}"
+        )
+        if future_nav_action == incompatible_action:
+            get_logger().debug(
+                f"Returning nav_action: {nav_action}"
+            )
+            return nav_action
+
+        if (
+            len(self.expert_action_list) > 0
+            and self.expert_action is not None
+            and stringcase.pascalcase(self.task.action_names()[self.expert_action]) == pose_action['action']
+            and not self.task.actions_taken_success[-1]
+        ):
+            get_logger().debug(
+                f"Returning nav_action: {nav_action}"
+            )
+            return nav_action
+        get_logger().debug(
+            f"Returning pose_action: {pose_action}"
+        )
+        return pose_action
+
+    def move_to_target_room(self, target_room: str, standing: bool = True, horizon: int = 30):
+        env = self.env
+        if env.current_room is None:
+            get_logger().debug(
+                f"In `env.current_room` is None..."
+            )
+            return None
+
+        if target_room is None:
+            get_logger().debug(
+                f"In `target_room` is None..."
+            )
+            return None
+
+        pose_act = self.exploration_pose(horizon=horizon)
+        if env.current_room == target_room:
+            get_logger().debug(
+                "ERROR: We're already in the target room."
+            )
+            return None
+
+        nav_act = self._expert_nav_action_to_room(target_room, horizon=horizon)
+        if nav_act == "Pass":
+            get_logger().debug(
+                f"ERROR: Received 'Pass' when navigating to {target_room} but agent is located in {env.current_room}."
+            )
+            return None
+        elif nav_act is None:
+            get_logger().debug(
+                f"ERROR: Failed to navigate to {target_room}; Received 'None'."
+            )
+            return None
+
+        return self.pose_action_if_compatible(
+            nav_action=dict(action=nav_act),
+            pose_action=pose_act,
+            horizon=horizon,
+            room_id=target_room,
+        )
+
+    def move_to_target_recep_room(self, standing: bool = True, horizon: int = 30):
+        get_logger().debug(
+            f"In `move_to_target_recep_room` method..."
+            f"Generate navigatorial action to move towards target recep room[{self.env.target_recep_room_id}]"
+            f" from current room[{self.env.current_room}]"
+        )
+        return self.move_to_target_room(
+            target_room=self.env.target_recep_room_id,
+            standing=standing,
+            horizon=horizon
+        )
+
+    def scan_for_target_recep(self, standing: bool = True, horizon: int = 30):
+        get_logger().debug(
+            f"In `scan_for_target_recep` method..."
+            f"Generate navigatorial action to find out the target recep."
+        )
         env = self.env
 
         if self.env.current_room is None:
             return None
         
-        self._last_to_target_recep_id = next(
-            o["objectId"] for o in env.objects()
-            if o["object"]
+        target_recep_id = env.target_recep_id
+        self._last_to_target_recep_id = target_recep_id
+
+        if target_recep_id in self.scanned_receps:
+            get_logger().debug(
+                f'Target recep {target_recep_id} is already found.'
+            )
+            return None
+
+        if self.obj_id_to_priority[target_recep_id] > self.max_priority:
+            get_logger().debug(
+                f"Priority for object[{target_recep_id}] ({self.obj_id_to_priority[target_recep_id]})"
+                f" exceeded the max priority[{self.max_priority}]"
+            )
+            return None
+
+        pose_act = self.exploration_pose(horizon=horizon)
+        target_recep_room = env.target_recep_room_id
+        target_recep = next(
+            o for o in env.objects() if o["objectId"] == target_recep_id
         )
+        
+        if self.env.current_room != target_recep_room:
+            get_logger().debug(
+                f"Agent[{self.env.current_room}] is not located on the target recep room[{target_recep_room}]..."
+                f"Let's move to the target recep room"
+            )
+            return self.move_to_target_recep_room(standing=standing, horizon=horizon)
+
+        get_logger().debug(
+            f"Agent[{self.env.current_room}] is arrived to the target recep room[{target_recep_room}]..."
+            f"Let's find out the target recep!"
+        )
+        
+        assert target_recep_id in self.cached_locs_for_recep, f"it should be updated!"
+        nav_needed = self._expert_nav_action_to_obj(
+            target_recep,
+            force_standing=standing,
+            force_horizon=horizon,
+            recep_target_keys=self.cached_locs_for_recep[target_recep_id],
+        )
+        get_logger().debug(
+            f"nav_needed: {nav_needed} & pose_act: {pose_act}"
+        )
+        
+        if nav_needed is None:
+            if pose_act is not None:
+                return pose_act
+            get_logger().debug(
+                f"Failed to navigate to {target_recep_id} in {env.current_room} during scan"
+                f" re-try navigation for {target_recep_id}."
+            )
+            self.obj_id_to_priority[target_recep_id] += 1
+            return self.scan_for_target_recep(standing, horizon)
+        
+        if nav_needed != "Pass":
+            return self.pose_action_if_compatible(
+                nav_action=dict(action=nav_needed),
+                pose_action=pose_act,
+                current_recep=target_recep,
+                standing=standing,
+                horizon=horizon,
+            )
+            
+        if len(self._current_object_target_keys) > 0:
+            self.scanned_receps.add(target_recep_id)
+            self.unvisited_recep_ids_per_room[self.env.current_room].remove(
+                target_recep_id
+            )
+            self.visited_recep_ids_per_room[self.env.current_room].add(target_recep_id)
+            get_logger().debug(
+                f"Agent Found the Target Recep 9' 3')9"
+            )
+            return self.scan_for_target_object(standing=standing, horizon=horizon)
+        
+        return None
+
+    def move_to_target_object_room(self, standing: bool = True, horizon: int = 30):
+        get_logger().debug(
+            f"In `move_to_target_object_room` method..."
+        )
+        return self.move_to_target_room(
+            target_room=self.env.target_object_room_id,
+            standing=standing,
+            horizon=horizon
+        )
+
+    def scan_for_target_object(self, standing=True, horizon=30):
+        get_logger().debug(
+            f"In `scan_for_target_object` method..."
+        )
+        env = self.env
+
+        if self.env.current_room is None:
+            return None
+
+        target_recep_id = env.target_recep_id
+        self._last_to_target_recep_id = target_recep_id
+        if self.obj_id_to_priority[target_recep_id] > self.max_priority:
+            get_logger().debug(
+                f"Priority for object[{target_recep_id}] ({self.obj_id_to_priority[target_recep_id]})"
+                f" exceeded the max priority[{self.max_priority}]"
+            )
+            return None
+        
+        if target_recep_id not in self.scanned_receps:
+            get_logger().debug(
+                f"Target recep should be found before trying to find out the target object"
+            )
+            return None
+
+        target_object_id = env.target_object_id
+        if self.obj_id_to_priority[target_object_id] > self.max_priority:
+            get_logger().debug(
+                f"Priority for object[{target_object_id}] ({self.obj_id_to_priority[target_object_id]})"
+                f" exceeded the max priority[{self.max_priority}]"
+            )
+            return None
+
+        target_object_room = env.target_object_room_id
+        target_object_receptacle = None
+        if target_object_id in self.scanned_objects:
+            for k, v in self.visited_object_ids_per_recep.items():
+                if target_object_id in v:
+                    target_object_receptacle = k
+                    break
+            get_logger().debug(
+                f"Target object is already found on {target_object_receptacle} in {target_object_room}"
+            )
+            return None
+
+        if env.current_room != target_object_room:
+            get_logger().debug(
+                f"Agent[{self.env.current_room}] is not located in the target object room[{target_object_room}]..."
+                f"Let's move to the target object room"
+            )
+            return self.move_to_target_object_room(standing=standing, horizon=horizon)
+
+        get_logger().debug(
+            f"Agent[{self.env.current_room}] arrived to the target object room[{target_object_room}]..."
+            f"Let's find out the target object!"
+        )
+
+        target_object = next(
+            o for o in env.objects() if o["objectId"] == target_object_id
+        )
+        if target_object_receptacle is None:
+            for recep, objs in self.unvisited_object_ids_per_recep.items():
+                if target_object_id in objs:
+                    target_object_receptacle = recep
+                    break
+        
+        nav_needed = self._expert_nav_action_to_obj(
+            target_object,
+            force_standing=standing,
+            force_horizon=horizon,
+            # recep_target_keys=self.cached_locs_for_recep[target_object_receptacle]
+        )
+        get_logger().debug(
+            f"generate expert nav action to obj [{nav_needed}]"
+            f" with standing {standing} and horizon {horizon}"
+            # f" and recep target keys {self.cached_locs_for_recep[target_object_receptacle]}"
+        )
+        
+        if nav_needed is None:
+            get_logger().debug(
+                f"Failed to navigate to {target_object_id} in {env.current_room} during scan"
+                f" re-try navigation for {target_object_id}."
+            )
+
+            nav_needed = self._expert_nav_action_to_obj(
+                target_object,
+            )
+            if nav_needed is None:
+                interactable_positions = env._interactable_positions_cache.get(
+                    scene_name=self.env.scene,
+                    obj=target_object,
+                    controller=self.env,
+                )
+                if len(interactable_positions) != 0:
+                    get_logger().debug(
+                        f"Could not find a path to {target_object['objectId']}"
+                        f" in scene {self.task.env.scene}"
+                        f" when at position {self.task.env.get_agent_location()}."
+                    )
+                else:
+                    get_logger().debug(
+                        f"Object {target_object['objectId']} in scene {self.task.env.scene}"
+                        f" has no interactable positions."
+                    )
+                self.obj_id_to_priority[target_object_id] += 1
+                return self.scan_for_target_object(standing, horizon)
+            
+        if nav_needed == "Pass":
+            with include_object_data(self.env.controller):
+                visible_objects = {
+                    o["objectId"]
+                    for o in self.env.last_event.metadata["objects"]
+                    if o["visible"]
+                }
+            if target_object["objectId"] not in visible_objects:
+                get_logger().debug(
+                    f"target object {target_object['objectId']} is not visible"
+                )
+                get_logger().debug(
+                    f"Try to invalidate the interactable loc {env.get_agent_location()}"
+                    f" for obj_pose [{target_object}]"
+                )
+                if self._invalidate_interactable_loc_for_pose(
+                    location=env.get_agent_location(),
+                    obj_pose=target_object,
+                ):
+                    get_logger().debug(
+                        f"Invalidated the interactable loc {env.get_agent_location()}"
+                        f" for obj_pose [{target_object}]"
+                    )
+                    return self.scan_for_target_object(standing=standing, horizon=horizon)
+
+                get_logger().debug(
+                    f"Failed to invalidate the loc."
+                )
+
+                if self.shortest_path_navigator.get_full_key(
+                    env.get_agent_location()
+                ) in self.cached_locs_for_recep[target_object_receptacle]:
+                    get_logger().debug(
+                        f"Remove the current location from the cached locs for recep"
+                    )
+                    self.cached_locs_for_recep[target_object_receptacle].remove(
+                        self.shortest_path_navigator.get_full_key(env.get_agent_location())
+                    )
+                    get_logger().debug(
+                        f"Scan the target object with removed cached locs"
+                    )
+                    return self.scan_for_target_object(standing, horizon)
+
+                interactable_positions = env._interactable_positions_cache.get(
+                    scene_name=self.env.scene,
+                    obj=target_object,
+                    controller=self.env,
+                )
+                for ip in interactable_positions:
+                    if (
+                        ip["x"] == env.get_agent_location()["x"]
+                        and ip["z"] == env.get_agent_location()["z"]
+                        and ip["rotation"] == env.get_agent_location()["rotation"]
+                    ):
+                        get_logger().debug(
+                            f"Change the standing and horizon constraints at current location"
+                            f" then find out the target object [{ip}]"
+                        )
+                        return self.scan_for_target_object(standing=ip["standing"], horizon=ip["horizon"])
+
+                get_logger().debug(
+                    f"No interactable positions available at the current location"
+                )
+                
+                get_logger().debug(
+                    f"ERROR: IMPOSSIBLE RESULT..."
+                )
+                return None
+            
+            get_logger().debug(
+                f"Agent Found the Target object {target_object['objectId']} 9' 3')9"
+                f" and arrived to the interactable position"
+            )
+            self.unvisited_object_ids_per_recep[target_object_receptacle].remove(target_object['objectId'])
+            self.scanned_objects.add(target_object['objectId'])
+            self.visited_object_ids_per_recep[target_object_receptacle].add(target_object['objectId'])
+            
+            return self.home_service_pickup(mode="causal")
+        
+        get_logger().debug(
+            f"Returning NAV_ACTION [{nav_needed}]"
+        )
+        return dict(action=nav_needed)
+
+    def home_service_pickup(self, mode):
+        get_logger().debug(
+            f"In `home_service_pickup` method..."
+        )
+        if self.exploration_enabled and mode == "causal":
+            if not (
+                self.env.target_recep_id in self.scanned_receps
+                and self.env.target_object_id in self.scanned_objects
+            ):
+                if self.env.target_object_id not in self.scanned_objects:
+                    get_logger().debug(
+                        f"Target object {self.env.target_object_id} not found yet."
+                    )
+                if self.env.target_recep_id not in self.scanned_receps:
+                    get_logger().debug(
+                        f"Target receptacle {self.env.target_recep_id} not found yet."
+                    )
+                return None
+
+        target_object = next(
+            o for o in self.env.objects() if o["objectId"] == self.env.target_object_id
+        )
+        target_recep = next(
+            o for o in self.env.objects() if o["objectId"] == self.env.target_recep_id
+        )
+        if (
+            target_object["objectId"] in target_recep["receptacleObjectIds"]
+        ):
+            get_logger().debug(
+                f"target object is located on the target recep "
+                f"Task DONE!!!!"
+            )
+            return None
+
+        if self.obj_id_to_priority[self.env.target_object_id] > self.max_priority:
+            get_logger().debug(
+                f"Priority for object[{self.env.target_object_id}] ({self.obj_id_to_priority[self.env.target_object_id]})"
+                f" exceeded the max priority[{self.max_priority}]"
+            )
+            return None
+
+        if self.obj_id_to_priority[self.env.target_recep_id] > self.max_priority:
+            get_logger().debug(
+                f"Priority for object[{self.env.target_recep_id}] ({self.obj_id_to_priority[self.env.target_recep_id]})"
+                f" exceeded the max priority[{self.max_priority}]"
+            )
+            return None
+
+        if self.env.current_room != self.env.target_object_room_id:
+            get_logger().debug(
+                f"Move to the target object room {self.env.target_object_room_id}"
+            )
+            return self.move_to_target_object_room()
+
+        self._last_to_interact_object_pose = target_object
+        if self.exploration_enabled:
+            target_object_receptacle = None
+            for recep, objs in self.unvisited_object_ids_per_recep.items():
+                if self.env.target_object_id in objs:
+                    target_object_receptacle = recep
+                    break
+
+            expert_nav_action = self._expert_nav_action_to_obj(
+                obj=target_object,
+                recep_target_keys=self.cached_locs_for_recep[
+                    target_object_receptacle
+                ] if target_object_receptacle is not None else None,
+            )
+
+        else:
+            expert_nav_action = self._expert_nav_action_to_obj(obj=target_object)
+
+        if expert_nav_action is None:
+            interactable_positions = self.env._interactable_positions_cache.get(
+                scene_name=self.env.scene,
+                obj=target_object,
+                controller=self.env
+            )
+            if len(interactable_positions) != 0:
+                get_logger().debug(
+                    f"Could not find a path to {target_object['objectId']}"
+                    f" in scene {self.task.env.scene}"
+                    f" when at position {self.task.env.get_agent_location()}."
+                )
+            else:
+                get_logger().debug(
+                    f"Object {target_object['objectId']} in scene {self.task.env.scene}"
+                    f" has no interactable positions."
+                )
+            self.obj_id_to_priority[target_object["objectId"]] += 1
+            return self.home_service_pickup(mode=mode)
+        
+        if expert_nav_action == "Pass":
+            with include_object_data(self.env.controller):
+                visible_objects = {
+                    o["objectId"]
+                    for o in self.env.last_event.metadata["objects"]
+                    if o["visible"]
+                }
+
+            if target_object["objectId"] not in visible_objects:
+                if self._invalidate_interactable_loc_for_pose(
+                    location=self.env.get_agent_location(),
+                    obj_pose=target_object,
+                ):
+                    return self.home_service_pickup(mode=mode)
+
+                get_logger().debug(
+                    "ERROR: This should not be possible. Failed to invalidate interactable loc for obj pose"
+                )
+                return None
+            
+            return dict(action="Pickup", objectId=target_object["objectId"],)
+
+        return dict(action=expert_nav_action)
+
     '''
     ########################### Static Methods ###########################
     '''
@@ -1023,35 +1732,6 @@ class GreedySimpleHomeServiceExpert:
         return res_xyz
 
     @staticmethod
-    def _try_to_interact_with_objs_on_recep(
-        env: HomeServiceEnvironment,
-        interactable_positions: List[Dict[str, Union[float, int, bool]]],
-        objs_on_recep: Set[str],
-        horizon: int,
-        standing: bool,
-    ) -> List[Dict[str, Union[float, int, bool]]]:
-        # Try to (greedily) find an interactable positions for all/most objects on objs_on_recep
-        last_interactable = interactable_positions
-        missing_objs_on_recep = copy.copy(objs_on_recep)
-        for obj_id in missing_objs_on_recep:
-            new_interactable = env._interactable_positions_cache.get(
-                scene_name=env.scene,
-                obj=next(o for o in env.objects() if o["objectId"] == obj_id),
-                controller=env,
-                reachable_positions=GreedySimpleHomeServiceExpert.extract_xyz(
-                    last_interactable
-                ),
-                force_horizon=horizon,
-                force_standing=standing,
-                avoid_teleport=True,
-            )
-            if len(new_interactable) > 0:
-                objs_on_recep.remove(obj_id)
-                last_interactable = new_interactable
-
-        return last_interactable
-
-    @staticmethod
     def crouch_stand_if_needed(
         interactable_positions: List[Dict[str, Union[float, int, bool]]],
         agent_loc: Dict[str, Union[float, int, bool]],
@@ -1071,437 +1751,276 @@ class GreedySimpleHomeServiceExpert:
                     agent_loc, gdl, ignore_standing=True, tol=tol
                 ):
                     if agent_loc["standing"] != gdl["standing"]:
-                        return "Crouch" if agent_loc["stadning"] else "Stand"
+                        return "Crouch" if agent_loc["standing"] else "Stand"
                     else:
                         return "Pass"
 
         return None
 
 
-'''
-class SubTaskExpert:
+class HomeServiceSubtaskActionExpert(HomeServiceGreedyActionExpert):
     def __init__(
         self,
-        task: "HomeServiceBaseTask",
-        shortest_path_navigator: ShortestPathNavigatorTHOR,
+        task: "HomeServiceTask",
+        shortest_path_navigator: ShortestPathNavigator,
+        max_priority: int = 3,
+        steps_for_time_pressure: int = 250,
+        exploration_enabled: bool = True,
+        use_planner: bool = True,
+        subtasks: List[str] = SUBTASKS,
+        **kwargs,
     ):
+        get_logger().debug(
+            f"SubtaskExpert started for {task.env.scene}"
+        )
+        self.exploration_enabled = exploration_enabled
         self.task = task
-        self.shortest_path_navigator = shortest_path_navigator
         assert self.task.num_steps_taken() == 0
 
+        self.shortest_path_navigator = shortest_path_navigator
+
+        self._last_to_target_recep_id: Optional[str] = None
+        self.scanned_receps = set()
+        self._current_object_target_keys: Optional[Set[AgentLocKeyType]] = None
+        self.recep_id_loc_per_room = dict()
+        self.cached_locs_for_recep = dict()
+        self.scanned_objects = set()
+        self.object_id_loc_per_recep_id = dict()
+        self.cached_locs_for_objects = dict()
+
+        self.max_priority = max_priority
+        self.obj_id_to_priority: defaultdict = defaultdict(lambda: 0)
+        self.visited_recep_ids_per_room = {
+            room: set() for room in self.env.room_to_poly
+        }
+        self.unvisited_recep_ids_per_room = self.env.room_to_static_receptacle_ids()
+        self.visited_object_ids_per_recep = {
+            recep: set()
+            for room in self.env.room_to_poly
+            for recep in self.unvisited_recep_ids_per_room[room]
+        }
+        self.unvisited_object_ids_per_recep = {
+            recep: set(obj["receptacleObjectIds"])
+            for recep in self.visited_object_ids_per_recep
+            for obj in self.env.objects()
+            if obj["objectId"] == recep
+        }
+
+        self.steps_for_time_pressure = steps_for_time_pressure
+
+        self.last_expert_mode: Optional[str] = None
+
         self.expert_action_list: List[int] = []
-        self.goto_action_list: List[str] = ["RotateRight" for _ in range(4)]
-        self.check_room_type_done: bool = False
-        self.require_check_room_type: bool = True
 
+        self._last_held_object_id: Optional[str] = None
         self._last_to_interact_object_pose: Optional[Dict[str, Any]] = None
-        self.map_oracle = True
+        self._id_of_object_we_wanted_to_pickup: Optional[str] = None
 
+        self.subtasks_names = subtasks
+        
+        self.planner = None
+        if use_planner:
+            self.planner = HomeServiceSimpleSubtaskPlanner(
+                task=task,
+            )
+            self.planner.next_subtask()
+            self.expert_subtask_list: List[int] = []
+            
         self.shortest_path_navigator.on_reset()
-        self.update(action_taken=None, action_success=None)
-
-    @property
-    def expert_action(self) -> int:
-        assert self.task.num_steps_taken() == len(self.expert_action_list) - 1, (
-            f"self.task.num_steps_taken(): {self.task.num_steps_taken()} is not equal to \
-                len(self.expert_action_list) - 1: {len(self.expert_action_list) - 1}"
+        self.update(
+            action_taken=None,
+            action_success=None,
         )
-        return self.expert_action_list[-1]
 
     @property
-    def goto_action(self) -> str:        
-        if len(self.goto_action_list) > 0:
-            return self.goto_action_list.pop()
+    def expert_subtask(self) -> int:
+        return self.expert_subtask_list[-1]
 
-        else:
+    @property
+    def current_subtask(self) -> Optional[int]:
+        if self.planner is None:
             return None
+        return self.planner.current_subtask
+
+    @property
+    def current_subtask_str(self) -> Optional[str]:
+        if self.planner is None:
+            return None
+        return self.planner.subtask_str(self.current_subtask)
+
+    @property
+    def visible_objects(self) -> Sequence[str]:
+        with include_object_data(self.env.controller):
+            visible_objects = {
+                o["objectId"]
+                for o in self.env.last_event.metadata["objects"]
+                if o["visible"]
+            }
+
+        return visible_objects
+
+    '''
+    ########################### Methods ###########################
+    '''
+    def update_visible_objects(self):
+        for obj in self.visible_objects:
+            obj_recep = None
+            for recep, objs in self.unvisited_object_ids_per_recep.items():
+                if obj in objs:
+                    obj_recep = recep
+                    break
+            if obj_recep is None:
+                continue
+            if obj in self.cached_locs_for_objects:
+                if self.shortest_path_navigator.get_full_key(
+                    self.env.get_agent_location()
+                ) in self.cached_locs_for_objects[obj]:
+                    if obj not in self.scanned_objects:
+                        self.scanned_objects.add(obj)
+                    if obj in self.unvisited_object_ids_per_recep[obj_recep]:
+                        self.unvisited_object_ids_per_recep[obj_recep].remove(obj)
+                    if obj not in self.visited_object_ids_per_recep[obj_recep]:
+                        self.visited_object_ids_per_recep[obj_recep].add(obj)
+                continue
+            interactable_positions = self.env._interactable_positions_cache.get(
+                scene_name=self.env.scene,
+                obj=next(
+                    o for o in self.env.objects()
+                    if o['objectId'] == obj
+                ),
+                controller=self.env,
+            )
+            if self.shortest_path_navigator.get_full_key(
+                self.env.get_agent_location()
+            ) in [
+                self.shortest_path_navigator.get_full_key(ip)
+                for ip in interactable_positions
+            ]:
+                self.cached_locs_for_objects[obj] = set(
+                    [
+                        self.shortest_path_navigator.get_full_key(loc)
+                        for loc in interactable_positions
+                    ]
+                )
+                self.unvisited_object_ids_per_recep[obj_recep].remove(obj)
+                self.scanned_objects.add(obj)
+                self.visited_object_ids_per_recep[obj_recep].add(obj)
 
     def update(
         self,
         action_taken: Optional[int],
         action_success: Optional[bool],
     ):
+        self.update_visited_receps()
+        self.update_visible_objects()
         if action_taken is not None:
             assert action_success is not None
+            get_logger().debug(
+                f"STEP-{self.task.num_steps_taken()}: action[{self.task.action_names()[action_taken]}({action_taken})] action_success[{action_success}]"
+            )
 
             action_names = self.task.action_names()
             last_expert_action = self.expert_action_list[-1]
             agent_took_expert_action = action_taken == last_expert_action
             action_str = action_names[action_taken]
 
-            was_nav_action = any(k in action_str for k in ['move', 'rotate', 'look'])
-            was_goto_action = 'goto' in action_str
-            if self.task.current_subtask[0] == "Done":
-                return self._generate_and_record_expert_action()
-            # if self.task.current_subtask[0] == "Pickup":
-            #     if self.task.env.scene == self.task.env.current_task_spec.target_scene:
-            #         with include_object_data(self.task.env.controller):
-            #             md = self.task.env.last_event.metadata
-            #             cur_subtask_target = next(
-            #                 (o for o in md["objects"] if o["objectType"] == self.task.current_subtask[1]), None
-            #             )
+            if self.planner is not None:
+                self.planner.next_subtask()
+                self.expert_subtask_list.append(self.planner.current_subtask)
+                last_expert_subtask = self.expert_subtask_list[-1]
+                get_logger().debug(
+                    f"STEP-{self.task.num_steps_taken()}: planned current subtask[{self.subtasks_names[self.planner.current_subtask]}({self.planner.current_subtask})]"
+                )
 
-            #             print(f'cur_subtask_target in AFTER navigate success in update()')
-            #             print(f'visible: {cur_subtask_target["visible"]} | distance: {cur_subtask_target["distance"]}')
-            # elif self.task.current_subtask[0] == "Put":
-            #     if self.task.env.scene == self.task.env.current_task_spec.target_scene:
-            #         with include_object_data(self.task.env.controller):
-            #             md = self.task.env.last_event.metadata
-            #             cur_subtask_place = next(
-            #                 (o for o in md["objects"] if o["objectType"] == self.task.current_subtask[2]), None
-            #             )
+            was_nav_action = any(k in action_str for k in ["move", "rotate", "look"])
 
-            #             print(f'cur_subtask_place in AFTER navigate success in update()')
-            #             print(f'visible: {cur_subtask_place["visible"]} | distance: {cur_subtask_place["distance"]}')
+            if "pickup_" in action_str and action_success:
+                if agent_took_expert_action:
+                    self._id_of_object_we_wanted_to_pickup = self._last_to_interact_object_pose["objectId"]
+                else:
+                    get_logger().debug(
+                        f"The agent picked up the wrong object [{self._last_to_interact_object_pose['objectId']}]..."
+                        f" thus change the subtask as [GotoObject]"
+                    )
+                    self.planner.set_subtask("GotoObject")
+                
+
+            if ("put_" in action_str or "drop_held" in action_str) and agent_took_expert_action and action_success:
+                if self._id_of_object_we_wanted_to_pickup is not None:
+                    self.obj_id_to_priority[
+                        self._id_of_object_we_wanted_to_pickup
+                    ] += 1
+                else:
+                    self.obj_id_to_priority[
+                        self._last_held_object_id
+                    ] += 1
+
+            if "open_by_type" in action_str and agent_took_expert_action:
+                self._receptacle_object_to_open = self._last_to_interact_object_pose
 
             if not action_success:
                 if was_nav_action:
                     self.shortest_path_navigator.update_graph_with_failed_action(
                         stringcase.pascalcase(action_str)
                     )
-                # elif (
-                #     "pickup" in action_str
-                #     or "open_by_type" in action_str
-                #     or "close_by_type" in action_str
-                #     or "put_by_type" in action_str
-                # ) and action_taken == last_expert_action:
-                #     assert self._last_to_interact_object_pose is not None
-                #     self._invalidate_interactable_loc_for_pose(
-                #         location=self.task.env.get_agent_location(),
-                #         obj_pose=self._last_to_interact_object_pose,
-                #     )
-                #     self.task.rollback_subtask()
-                elif was_goto_action:
-                    # Reset Fail?
-                    raise RuntimeError
-
                 elif (
-                    action_str == "pickup"
+                    "pickup_" in action_str 
+                    or "open_by_type" in action_str 
+                    or "close_by_type" in action_str
+                    or "put_" in action_str
                 ) and action_taken == last_expert_action:
-                    if self.task.env.scene == self.task.env.current_task_spec.target_scene:
-                        assert self._last_to_interact_object_pose is not None
+                    assert self._last_to_interact_object_pose is not None
+                    get_logger().debug(
+                        f"Action {action_str} FAILED. "
+                        f"Invalidate current location [{self.task.env.get_agent_location()}] "
+                        f"for object pose [{self._last_to_interact_object_pose}]."
+                    )
                     self._invalidate_interactable_loc_for_pose(
                         location=self.task.env.get_agent_location(),
                         obj_pose=self._last_to_interact_object_pose,
                     )
-                    # After invalidate current agent location, re-navigate to the object
-                    if self.task.current_subtask[0] != "Navigate":
-                        while self.task.current_subtask[0] != "Navigate":
-                            self.task.rollback_subtask()
-
                 elif (
-                    action_str == "put"
-                ) and action_taken == last_expert_action:
-                    if self.task.env.scene == self.task.env.current_task_spec.target_scene:
-                        assert self._last_to_interact_object_pose is not None
-                    self._invalidate_interactable_loc_for_pose(
-                        location=self.task.env.get_agent_location(),
-                        obj_pose=self._last_to_interact_object_pose,
-                    )
-                    # After invalidate current agent location, re-navigate to the object
-                    if self.task.current_subtask[0] != "Navigate":
-                        # print("  > rollback subtask to navigate")
-                        while self.task.current_subtask[0] != "Navigate":
-                            self.task.rollback_subtask()
-                    
-                    # print(f'updated subtask {self.task.current_subtask}')
-
-                elif (
-                    ("crouch" in action_str or "stand" in action_str) 
+                    ("crouch" in action_str or "stand" in action_str)
+                    and self.task.env.held_object is not None
                     and action_taken == last_expert_action
                 ):
-                    if self.task.env.scene == self.task.env.current_task_spec.target_scene:
-                        assert self._last_to_interact_object_pose is not None
                     agent_loc = self.task.env.get_agent_location()
                     agent_loc["standing"] = not agent_loc["standing"]
                     self._invalidate_interactable_loc_for_pose(
                         location=agent_loc,
                         obj_pose=self._last_to_interact_object_pose,
                     )
+
             else:
-                if not was_nav_action:
-                    # if (
-                    #     "pickup" in action_str
-                    #     or "open_by_type" in action_str
-                    #     or "close_by_type" in action_str
-                    #     or "put_by_type" in action_str
-                    # ): 
-                    #     self._last_to_interact_object_pose = None
-                    if action_str == "pickup":
-                        # if (
-                        #     agent_took_expert_action or 
-                        #     self.task.planned_task[self.task._subtask_step - 1][0] == "Pickup"
-                        # ):
-                        if agent_took_expert_action:
-                            held_object = self.task.env.held_object
-                            if held_object is None:
-                                raise RuntimeError(
-                                    f"Impossible..."
-                                )
-                            elif held_object["objectType"] != self._last_to_interact_object_pose["objectType"]:
-                                raise RuntimeError(
-                                    f"Impossible......"
-                                )
-                            else:
-                                self._last_to_interact_object_pose = None
-                        elif self.task.current_subtask[0] != "Goto":
-                            # unintended pickup action succeeded
-                            while self.task.current_subtask[0] != "Goto":
-                                self.task.rollback_subtask()
-
-                    elif action_str == "put":
-                        # if (
-                        #     agent_took_expert_action or 
-                        #     self.task.planned_task[self.task._subtask_step - 1][0] == "Put"
-                        # ):
-                        if agent_took_expert_action:
-                            assert self.task.env.held_object is None
-                            self._last_to_interact_object_pose = None
-                        elif self.task.current_subtask[0] != "Goto":
-                            while self.task.current_subtask[0] != "Goto":
-                                self.task.rollback_subtask()
-                    
-                    elif was_goto_action:
-                        if self.task.current_subtask[0] != "Goto":
-                            # If current subtask is not GOTO, rollback subtasks to GOTO
-                            while self.task.current_subtask[0] != "Goto":
-                                self.task.rollback_subtask()
-                        self.require_check_room_type = True
-                        self.goto_action_list = ["RotateRight" for _ in range(4)]
-
-                    elif "crouch" in action_str or "stand" in action_str:
-                        # took crouch/stand action in pickup/put subtask
-                        # should navigate to target again
-                        if self.task.current_subtask[0] in ("Pickup", "Put"):
-                            while self.task.current_subtask[0] != "Navigate":
-                                self.task.rollback_subtask()
-                else:
-                    if self.task.current_subtask[0] in ("Pickup", "Put"):
-                        # took nav action in pickup/put subtask
-                        # should navigate to target again
-                        while self.task.current_subtask[0] != "Navigate":
-                            self.task.rollback_subtask()
+                # If the action succeeded and was not a move action then let's force an update
+                # of our currently targeted object
+                if not was_nav_action and not (
+                    "crouch" in action_str or "stand" in action_str
+                ):
+                    self._last_to_interact_object_pose = None
+            
+        held_object = self.task.env.held_object
+        if self.task.env.held_object is not None:
+            self._last_held_object_id = held_object["objectId"]
 
         self._generate_and_record_expert_action()
 
-    def _get_interactable_positions(
-        self,
-        obj: Dict[str, Any]
-    ):
-        if self.map_oracle:
-            if obj is not None:
-                return self.task.env._interactable_positions_cache.get(
-                    scene_name=self.task.env.scene, obj=obj, controller=self.task.env.controller,
-                    # max_distance=1.0
-                )
-            else:
-                return []
-        else:
-            #TODO
-            pass
-
-    def _expert_goto_action_to_scene_type(
-        self,
-        scene_type: str
-    ) -> Optional[str]:
-        # if len(self.goto_action_list) == 0:
-        #     if not self.task._1st_check:
-        #         for _ in range(4):
-        #             self.goto_action_list.append("RotateRight")
-        #         self.task._1st_check = True
-        #     else:
-        #         if not self.task._took_goto_action:
-        #             self.goto_action_list.append(f"Goto{scene_type}")
-        #         elif not self.task._2nd_check:
-        #             for _ in range(4):
-        #                 self.goto_action_list.append("RotateRight")
-        #             self.task._2nd_check = True
-
-        # goto_action = self.goto_action
-        # if len(self.goto_action_list) == 0:
-        #     if self.task._2nd_check:
-        #         self.task._check_goto_done = True
-        #     elif self.task._1st_check and (
-        #         SCENE_TO_SCENE_TYPE[self.task.env.scene] == scene_type
-        #     ):
-        #         self.task._check_goto_done = True
-        if len(self.goto_action_list) > 0:
-            self.check_room_type_done = False
-            goto_action = self.goto_action
-            if len(self.goto_action_list) == 0:
-                self.check_room_type_done = True
-                self.require_check_room_type = False
-
-        else:
-            goto_action = f"Goto{scene_type}"
-            self.require_check_room_type = True
-
-        return goto_action
-
-    def _expert_nav_action_to_obj(
-        self,
-        obj: Dict[str, Any]
-    ) -> Optional[str]:
-        env: HomeServiceTHOREnvironment = self.task.env
-        agent_loc = env.get_agent_location()
-        shortest_path_navigator = self.shortest_path_navigator
-
-        interactable_positions = self._get_interactable_positions(obj)
-
-        target_keys = [
-            shortest_path_navigator.get_key(loc) for loc in interactable_positions
-        ]
-
-        if len(target_keys) == 0:
-            # print(f'No target keys')
-            return "Fail"
-
-        source_state_key = shortest_path_navigator.get_key(env.get_agent_location())
-
-        action = "Pass"
-        if source_state_key not in target_keys:
-            try:
-                action = shortest_path_navigator.shortest_path_next_action_multi_target(
-                    source_state_key=source_state_key, goal_state_keys=target_keys,
-                )
-            except nx.NetworkXNoPath as _:
-                # print(f'No path exists from {source_state_key} to {target_keys}')
-                rand_nav_action = random.choice(["MoveAhead", "RotateRight", "RotateLeft", "LookUp", "LookDown"])
-                # print(f'take random nav action... {rand_nav_action}')
-                # import pdb; pdb.set_trace()
-                return rand_nav_action
-
-        if action != "Pass":
-            return action
-        else:
-            agent_x = agent_loc["x"]
-            agent_z = agent_loc["z"]
-            for gdl in interactable_positions:
-                d = round(abs(agent_x - gdl["x"]) + abs(agent_z - gdl["z"]), 2)
-                if d <= 1e-2:
-                    if _are_agent_locations_equal(agent_loc, gdl, ignore_standing=True):
-                        # print("????")
-                        # print(f'agent_loc: {agent_loc} | gdl: {gdl}')
-                        if agent_loc["standing"] != gdl["standing"]:
-                            return "Crouch" if agent_loc["standing"] else "Stand"
-                        else:
-                            return "Pass"
-        
-        return None
-
-    def _expert_nav_action_to_position(self, position) -> Optional[str]:
-        """Get the shortest path navigational action towards the certain position
-
-        """
-        env: HomeServiceTHOREnvironment = self.task.env
-        shortest_path_navigator = self.shortest_path_navigator
-
-        if isinstance(position, np.ndarray):
-            position_key = (round(position[0], 2), round(position[1], 2), round(position[2], 2))
-            position = dict(
-                x=position[0],
-                y=position[1],
-                z=position[2],
-            )
-        elif isinstance(position, dict):
-            position_key = (round(position['x'], 2), round(position['y'], 2), round(position['z'], 2))
-        
-        if position_key not in shortest_path_navigator._position_to_object_id:
-            # Spawn the TargetCircle and place it on the position
-            event = env.controller.step("SpawnTargetCircle", anywhere=True)
-            assert event.metadata["lastActionSuccess"]
-            id_target_circle = event.metadata["actionReturn"]
-
-
-            event = env.controller.step(
-                "TeleportObject", 
-                objectId=id_target_circle, 
-                position=position, 
-                rotation=0, 
-                forceAction=True
-            )
-            assert event.metadata["lastActionSuccess"]
-            
-            # To change objectId for former target circle
-            event = env.controller.step("SpawnTargetCircle", anywhere=True)
-            assert event.metadata["lastActionSuccess"]
-            id_target_circle = event.metadata["actionReturn"]
-
-            event = env.controller.step("RemoveFromScene", objectId=id_target_circle)
-            assert event.metadata["lastActionSuccess"]
-
-            def distance(p1, p2):
-                d = 0
-                for c in ("x", "y", "z"):
-                    d += (p1[c] - p2[c]) ** 2
-                return round(math.sqrt(d), 2)
-                
-            # check
-            target_circle_after_teleport = next(
-                (
-                    obj for obj in env.last_event.metadata['objects']
-                    if obj['objectType'] == "TargetCircle" and distance(obj["position"], position) < 0.05
-                ), None
-            )
-            assert target_circle_after_teleport is not None
-            shortest_path_navigator._position_to_object_id[position_key] = target_circle_after_teleport['objectId']
-
-        object_id = shortest_path_navigator._position_to_object_id[position_key]
-        obj = next(
-            obj for obj in env.last_event.metadata['objects']
-            if obj['objectId'] == object_id
-        )
-        return self._expert_nav_action_to_obj(obj=obj)
-
-    def _invalidate_interactable_loc_for_pose(
-        self, 
-        location: Dict[str, Any], 
-        obj_pose: Dict[str, Any]
-    ) -> bool:
-        """Invalidate a given location in the `interactable_positions_cache` as
-        we tried to interact but couldn't."""
-        env: HomeServiceTHOREnvironment = self.task.env
-
-        if obj_pose is None:
-            return False
-            
-        interactable_positions = env._interactable_positions_cache.get(
-            scene_name=env.scene, obj=obj_pose, controller=env.controller
-        )
-        for i, loc in enumerate([*interactable_positions]):
-            if (
-                self.shortest_path_navigator.get_key(loc)
-                == self.shortest_path_navigator.get_key(location)
-                and loc["standing"] == location["standing"]
-            ):
-                interactable_positions.pop(i)
-                return True
-        return False
-
     def _generate_and_record_expert_action(self):
-        if self.task.num_steps_taken() == len(self.expert_action_list) + 1:
-            get_logger().warning(
-                f"Already generated the expert action at step {self.task.num_steps_taken()}"
-            )
-            return
-        assert self.task.num_steps_taken() == len(
-            self.expert_action_list
-        ), f"{self.task.num_steps_taken()} != {len(self.expert_action_list)}"
         expert_action_dict = self._generate_expert_action_dict()
-
-        if expert_action_dict is None or expert_action_dict["action"] is None:
+        # self.expert_subtask_list.append(self.planner.current_subtask)
+        if expert_action_dict is None:
             self.expert_action_list.append(None)
-            return          
-
+            return
+        
         action_str = stringcase.snakecase(expert_action_dict["action"])
         if action_str not in self.task.action_names():
-            if "objectType" in expert_action_dict:
-                obj_type = stringcase.snakecase(expert_action_dict["objectType"])
-                action_str = f"{action_str}_{obj_type}"
-            elif action_str == "fail":
-                # print("fail?")
-                action_str = "pass"
-
+            current_objectId = expert_action_dict["objectId"]
+            current_obj = next(
+                o for o in self.task.env.objects() if o["objectId"] == current_objectId
+            )
+            obj_type = stringcase.snakecase(current_obj["objectType"])
+            action_str = f"{action_str}_{obj_type}"
+            
         try:
             self.expert_action_list.append(self.task.action_names().index(action_str))
         except ValueError:
@@ -1510,269 +2029,527 @@ class SubTaskExpert:
             )
             self.expert_action_list.append(None)
 
-    def _generate_expert_action_dict(self) -> Dict[str, Any]:
-        env: HomeServiceTHOREnvironment = self.task.env
-
-        if env.mode != HomeServiceMode.SNAP:
+    def _generate_expert_action_dict(self, horizon=30) -> Optional[Dict[str, Any]]:
+        if self.env.mode != HomeServiceMode.SNAP:
             raise NotImplementedError(
-                f"Expert only defined for 'easy' mode (current mode: {env.mode}"
+                f"Expert only defined for 'easy' mode (current mode: {self.env.mode}"
             )
 
-        # Check current subtask
-        subtask_action, subtask_target, subtask_place = self.task.current_subtask
-        agent_loc = env.get_agent_location()
-        held_object = env.held_object
+        try:
+            attempt = None
+            k = 0
+            while attempt is None and k < 5:
+                attempt = self.stop_episode()
+                if attempt is not None:
+                    return self._log_output_mode("Stop episode", attempt)
+                
+                attempt = self.put_object()
+                if attempt is not None:
+                    return self._log_output_mode("Put held object", attempt)
 
-        # subtask action
-        #   - "Done" : target = None, place = None
-        #   - "Goto" : place = None
-        #   - "Scan" : target = None, place = None
-        #   - "Navigate" : place = None
-        #   - "Pickup" : place = None
-        #   - "Put"
-        #   - "Open" : place = None
-        #   - "Close" : place = None
+                attempt = self.pickup_object()
+                if attempt is not None:
+                    return self._log_output_mode("Pickup object", attempt)
+                
+                attempt = self.close_receptacle()
+                if attempt is not None:
+                    return self._log_output_mode("Close receptacle", attempt)
+                
+                attempt = self.open_receptacle()
+                if attempt is not None:
+                    return self._log_output_mode("Open receptacle", attempt)
+                
+                attempt = self.goto_target()
+                if attempt is not None:
+                    return self._log_output_mode("Goto target", attempt)
+                
+                attempt = self.move_room()
+                if attempt is not None:
+                    return self._log_output_mode("Move room", attempt)
+                
+                attempt = self.explore()
+                if attempt is not None:
+                    return self._log_output_mode("Explore", attempt)
 
-        if subtask_action == "Done":
+                k += 1
+
+            get_logger().debug(
+                f"trial number exceeded 5"
+            )
+            # import pdb; pdb.set_trace()
             return dict(action="Done")
 
-        elif subtask_action == "Goto":
-            expert_goto_action = self._expert_goto_action_to_scene_type(
-                scene_type=subtask_target
-            )
-            if expert_goto_action is None:
-                raise RuntimeError
-            
-            return dict(action=expert_goto_action)
+        except:
+            import traceback
 
-        elif subtask_action == "Scan":
-            with include_object_data(env.controller):
-                current_objects = env.last_event.metadata["objects"]
-                target_obj = next(
-                    (
-                        obj for obj in current_objects
-                        if obj['objectType'] == env.current_task_spec.pickup_object
-                    ), None
+            get_logger().debug(f"EXCEPTION: Expert failure: {traceback.format_exc()}")
+            return None
+
+    def stop_episode(self) -> Optional[Dict[str, Any]]:
+        get_logger().debug(
+            f"In `stop_episode` method"
+        )
+        if self.current_subtask_str != "Stop":
+            get_logger().debug(
+                f"Current subtask is not [Stop]. Returning None."
+            )
+            return None
+        get_logger().debug(
+            f"Current subtask is [Stop]. Returning dict(action='Done')."
+        )
+        return dict(action="Done")
+
+    def put_object(self) -> Optional[Dict[str, Any]]:
+        get_logger().debug(
+            f"In `put_object` method"
+        )
+        if self.current_subtask_str != "Put":
+            get_logger().debug(
+                f"Current subtask is not [Put]. Returning None."
+            )
+            return None
+        
+        if self.env.held_object is None:
+            get_logger().debug(
+                f"Currently trying to [Put] but the agent is holding nothing."
+                f" Returning None"
+            )
+            return None
+        
+        if self.env.held_object['objectId'] != self.env.target_object_id:
+            get_logger().debug(
+                f"Currently trying to [Put] and the agent is NOT holding the target object."
+                f" Returning dict(action=DropHeldObejctWithSnap)"
+            )
+            return dict(action="DropHeldObjectWithSnap")
+        
+        self._last_to_interact_object_pose = next(
+            o for o in self.env.objects() if o["objectId"] == self.env.target_recep_id
+        )
+        if self._last_to_interact_object_pose['objectId'] in self.visible_objects:
+            recep_type = stringcase.pascalcase(self._last_to_interact_object_pose['objectType'])
+            get_logger().debug(
+                f"Currently trying to [Put] and the agent is holding the target object "
+                f"and the target recep is visible."
+                f" Returning dict(action=Put{recep_type})"
+            )
+            return dict(action=f"Put{recep_type}")
+        
+        get_logger().debug(
+            f"Currently trying to [Put] and the agent is holding the target object "
+            f"but the target recep is NOT visible."
+            f" Returning dict(action=DropHeldObejctWithSnap)"
+        )
+        return dict("DropHeldObjectWithSnap")
+
+    def pickup_object(self) -> Optional[Dict[str, Any]]:
+        get_logger().debug(
+            f"In `pickup_object` method"
+        )
+        if self.current_subtask_str != "Pickup":
+            get_logger().debug(
+                f"Current subtask is not [Pickup]. Returning None."
+            )
+            return None
+        
+        if self._last_to_interact_object_pose is None:
+            get_logger().debug(
+                f"Currently trying to [Pickup] but self._last_to_interact_object_pose is None"
+                f" Returning None"
+            )
+            return None
+
+        if self._last_to_interact_object_pose['objectId'] not in self.visible_objects:
+            get_logger().debug(
+                f"Currently trying to [Pickup] but {self._last_to_interact_object_pose['objectId']} is NOT visible."
+                f" Returning None"
+            )
+            return None
+        
+        get_logger().debug(
+            f"Currently trying to [Pickup] and {self._last_to_interact_object_pose['objectId']} is visible."
+            f" Returning dict(action='Pickup', objectId={self._last_to_interact_object_pose['objectId']})"
+        )
+        return dict(action=f"Pickup", objectId=self._last_to_interact_object_pose['objectId'],)
+            
+    def close_receptacle(self) -> Optional[Dict[str, Any]]:
+        get_logger().debug(
+            f"In `close_receptacle` method"
+        )
+        if self.current_subtask_str != "Close":
+            get_logger().debug(
+                f"Current subtask is not [Close]. Returning None."
+            )
+            return None
+
+        if self._last_to_target_recep_id is None:
+            get_logger().debug(
+                f"Currently trying to [Close] but self._last_to_target_recep_id is None"
+                f" Returning None"
+            )
+            return None
+
+        if self._last_to_target_recep_id not in self.visible_objects:
+            get_logger().debug(
+                f"Currently trying to [Close] but {self._last_to_target_recep_id} is NOT visible."
+                f" Returning None"
+            )
+            return None
+
+        get_logger().debug(
+            f"Currently trying to [Close] and {self._last_to_target_recep_id} is visible."
+            f" Returning dict(action='CloseByType', objectId={self._last_to_target_recep_id})"
+        )
+        return dict(action="CloseByType", objectId=self._last_to_target_recep_id,)
+
+    
+    def open_receptacle(self) -> Optional[Dict[str, Any]]:
+        get_logger().debug(
+            f"In `open_receptacle` method"
+        )
+        if self.current_subtask_str != "Open":
+            get_logger().debug(
+                f"Current subtask is not [Open]. Returning None."
+            )
+            return None
+        
+        if self._last_to_target_recep_id is None:
+            get_logger().debug(
+                f"Currently trying to [Open] but self._last_to_target_recep_id is None"
+                f" Returning None"
+            )
+            return None
+
+        if self._last_to_target_recep_id not in self.visible_objects:
+            get_logger().debug(
+                f"Currently trying to [Open] but {self._last_to_target_recep_id} is NOT visible."
+                f" Returning None"
+            )
+            return None
+
+        get_logger().debug(
+            f"Currently trying to [Open] and {self._last_to_target_recep_id} is visible."
+            f" Returning dict(action='OpenByType', objectId={self._last_to_target_recep_id}, openness=1.0)"
+        )
+        return dict(action="OpenByType", objectId=self._last_to_target_recep_id, openness=1.0)
+    
+    def goto_target(self) -> Optional[Dict[str, Any]]:
+        get_logger().debug(
+            f"In `goto_target` method"
+        )
+        if not self.current_subtask_str.startswith("Goto"):
+            get_logger().debug(
+                f"Current subtask does not start with [Goto]. Returning None."
+            )
+            return None
+
+        target = self.current_subtask_str.replace("Goto", "")
+        if target == "Object":
+            if self.env.held_object is not None:
+                get_logger().debug(
+                    f"Currently trying to [{self.current_subtask_str}] but the agent is holding object. "
+                    f"Returning None."
                 )
-                place_receps = None
-                if env.current_task_spec.place_receptacle != "User":
-                    place_receps = [
-                        obj for obj in current_objects
-                        if obj['objectType'] == env.current_task_spec.place_receptacle
-                    ]
-                    if len(place_receps) == 0:
-                        place_receps = None
-                
-                if target_obj is not None:
-                    pos = target_obj["axisAlignedBoundingBox"]["center"]
-                    self.task.target_positions = {
-                        env.current_task_spec.pickup_object: np.array([pos[k] for k in ("x", "y", "z")], dtype=np.float32),
-                    }
-                if place_receps is not None:
-                    pos = place_receps[0]["axisAlignedBoundingBox"]["center"]
-                    self.task.target_positions[env.current_task_spec.place_receptacle] = np.array([pos[k] for k in ("x", "y", "z")], dtype=np.float32)
-            
-            return dict(action="Pass")
+                return None
 
-        elif subtask_action == "Navigate":
-            # from metadata
-            # if env.scene != env.current_task_spec.target_scene:
-            #     # goto action performed
-            #     while self.task.current_subtask[0] == "Goto":
-            #         self.task.rollback_subtask()
-                    
-            #     return dict(action="Pass")
-            with include_object_data(env.controller):
-                current_objects = env.last_event.metadata["objects"]
-
-                if subtask_target is not None:
-                    if not isinstance(subtask_target, str):
-                        subtask_target = subtask_target['objectType']
-                    target_obj = next(
-                        (o for o in current_objects if o['objectType'] == subtask_target), None
-                    )
-            
-            if target_obj is None:
-                print('target_obj is None!!')
-                print(f'current scene: {self.task.env.scene} | target scene: {self.task.env.current_task_spec.target_scene}')
-                print(f"target_obj: {target_obj} \n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]} \n current_subtask: {self.task.current_subtask}")
-                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
-                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
-                print(f'rewards: {self.task.rewards}')
-            assert target_obj is not None
-            self._last_to_interact_object_pose = target_obj
-            expert_nav_action = self._expert_nav_action_to_obj(
-                obj=target_obj
+            # self._last_to_interact_object_pose = self.env.object_id_to_target_pose[
+            #     self.env.target_object_id
+            # ]
+            self._last_to_interact_object_pose = next(
+                o for o in self.env.objects()
+                if o['objectId'] == self.env.target_object_id
             )
-            
-            # if position is given
-            # expert_nav_action = self._expert_nav_action_to_position(
-            #     position=self.task.target_positions[subtask_target]
-            # )
+            expert_nav_action = self._expert_nav_action_to_obj(
+                obj=self._last_to_interact_object_pose
+            )
 
+            get_logger().debug(
+                f"Currently trying to [{self.current_subtask_str}] with "
+                f"self._last_to_interact_object_pose['objectId']: {self._last_to_interact_object_pose['objectId']}."
+            )
             if expert_nav_action is None:
-                interactable_positions = self._get_interactable_positions(obj=target_obj)
-                if len(interactable_positions) != 0:
-                    get_logger().debug(
-                        f"Could not find a path to the object {target_obj['objectId']}"
-                        f" in scene {env.scene}"
-                        f" when at position {agent_loc}."
-                    )
-                else:
-                    get_logger().debug(
-                        f"Object {target_obj['objectId']} in scene {env.scene}"
-                        f" has no interactable positions."
-                    )
-                return dict(action=expert_nav_action)
+                get_logger().debug(
+                    f"The agent failed to go to the target object."
+                    f" Returning None."
+                )
+                return None
             elif expert_nav_action == "Pass":
-                # retry = 0
-                # print('aaaa')
-                # print(f'target_obj: {target_obj["objectType"]} | visible: {target_obj["visible"]} | distance: {target_obj["distance"]}')
-                if not target_obj["visible"] or target_obj["distance"] > VISIBILITY_DISTANCE:
-                    if self._invalidate_interactable_loc_for_pose(
-                        location=agent_loc, obj_pose=target_obj
-                    ):
-                        return self._generate_expert_action_dict()
-                    # import pdb; pdb.set_trace()
-                    # raise RuntimeError(" IMPOSSIBLE. ")
-                    
-                    else:
-                        # print(f'invalidate failed')
-                        return dict(action="Fail")
-                
-            # elif expert_nav_action == "Fail":
-            #     return dict(action=expert_nav_action)
+                get_logger().debug(
+                    f"The agent arrived to the target object."
+                    f" Returning None."
+                )
+                return None
+            else:
+                get_logger().debug(
+                    f"The agent has not arrived to the target object."
+                    f" Returning dict(action='{expert_nav_action}')."
+                )
+                return dict(action=expert_nav_action)
+
+        elif target == "Receptacle":
+            self._last_to_target_recep_id = self.env.target_recep_id
+            recep = None
+            if self._last_to_target_recep_id not in self.env.object_id_to_target_pose:
+                recep = next(
+                    o for o in self.env.objects()
+                    if o['objectId'] == self._last_to_target_recep_id
+                )
+            else:
+                recep = self.env.object_id_to_target_pose[self._last_to_target_recep_id]
+
+            # if recep is None:
+            #     import pdb; pdb.set_trace()
             
-            return dict(action=expert_nav_action)
+            expert_nav_action = self._expert_nav_action_to_obj(
+                obj=recep
+            )
 
-        elif subtask_action == "Pickup":
-            # if env.scene != env.current_task_spec.target_scene:
-            #     # goto action performed
-            #     while self.task.current_subtask[0] == "Goto":
-            #         self.task.rollback_subtask()
-                    
-            #     return dict(action="Pass")
-            with include_object_data(env.controller):
-                current_objects = env.last_event.metadata["objects"]
-
-                if subtask_target is not None:
-                    if not isinstance(subtask_target, str):
-                        subtask_target = subtask_target['objectType']
-                    target_obj = next(
-                        (o for o in current_objects if o['objectType'] == subtask_target), None
-                    )
-            if target_obj is None:
-                print('target_obj is None!!')
-                print(f"target_obj: {target_obj} \n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]} \n current_subtask: {self.task.current_subtask}")
-                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
-                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
-                print(f'rewards: {self.task.rewards}')
-            elif not target_obj['visible']:
-                print('target_obj["visible"] is False!!!')
-                print(f"target_obj: {target_obj} \n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]} \n current_subtask: {self.task.current_subtask}")
-                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
-                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
-                print(f'rewards: {self.task.rewards}')
-
-            assert target_obj is not None and target_obj['visible']
-            self._last_to_interact_object_pose = target_obj
-            # return dict(action="Pickup", objectType=target_obj["objectType"])
-            return dict(action="Pickup")
-
-        elif subtask_action == "Put":
-            # if env.scene != env.current_task_spec.target_scene:
-            #     # goto action performed
-            #     while self.task.current_subtask[0] == "Goto":
-            #         self.task.rollback_subtask()
-                    
-            #     return dict(action="Pass")
-            with include_object_data(env.controller):
-                current_objects = env.last_event.metadata["objects"]
-
-                if subtask_target is not None:
-                    if not isinstance(subtask_target, str):
-                        subtask_target = subtask_target['objectType']
-                    target_obj = next(
-                        (o for o in current_objects if o['objectType'] == subtask_target), None
-                    )
-                if subtask_place is not None:
-                    if not isinstance(subtask_place, str):
-                        subtask_place = subtask_place['objectType']
-                    place_obj = next(
-                        (
-                            o for o in current_objects 
-                            if (
-                                o['objectType'] == subtask_place
-                                and o['visible']
-                            )
-                        ), 
-                        None
-                    )
-            # if held_object is None:
-            #     # Pickup has failed....
-            #     for _ in range(3):
-            #         self.task.rollback_subtask()
-            #     return dict(action="Pass")
-            
-            if target_obj is None or held_object is None:
-                if target_obj is None:
-                    print('target_obj is None!!')
-                if held_object is None:
-                    print('held_object is None!!')
-                print(f"target_obj: {target_obj} | held_object: {held_object}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]} \n current_subtask: {self.task.current_subtask}")
-                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
-                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
-                print(f'rewards: {self.task.rewards}')
-
-            elif held_object["objectId"] != target_obj["objectId"]:
-                print(f"held_object_id: {held_object['objectId']} | target_obj_id: {target_obj['objectId']}")
-                print(f"target_obj: {target_obj} | held_object: {held_object}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]} \n current_subtask: {self.task.current_subtask}")
-                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
-                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
-                print(f'rewards: {self.task.rewards}')
-
-            assert target_obj is not None and held_object["objectId"] == target_obj["objectId"]
-
-            if place_obj is None:
-                print('place_obj is None!!')
-                print(f"place_obj: {place_obj}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]}")
-                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
-                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
-                print(f'rewards: {self.task.rewards}')
-            elif not place_obj['visible']:
-                print('place_obj["visible"] is False!!!!')
-                print(f"place_obj: {place_obj}\n action_taken: {self.task.actions_taken} \n action_taken_success: {self.task.actions_taken_success}\n subtasks: {[subtask[0] for subtask in self.task.subtask_info]}")
-                print(f"planned_tasks: {self.task.planned_task} | num_subtasks: {self.task.num_subtasks} | subtask_step: {self.task._subtask_step}")
-                print(f"unique_id: {self.task.env.current_task_spec.unique_id}")
-                print(f'rewards: {self.task.rewards}')
-
-            assert place_obj is not None and place_obj["visible"]
-            self._last_to_interact_object_pose = place_obj
-            # return dict(action="PutByType", objectType=place_obj["objectType"])
-            return dict(action="Put")
-            
-        elif subtask_action in ["Open", "Close"]:
-            # if env.scene != env.current_task_spec.target_scene:
-            #     # goto action performed
-            #     while self.task.current_subtask[0] == "Goto":
-            #         self.task.rollback_subtask()
-                    
-            #     return dict(action="Pass")
-            with include_object_data(env.controller):
-                current_objects = env.last_event.metadata["objects"]
-
-                if subtask_target is not None:
-                    if not isinstance(subtask_target, str):
-                        subtask_target = subtask_target['objectType']
-                    target_obj = next(
-                        (o for o in current_objects if o['objectType'] == subtask_target), None
-                    )
-            assert target_obj is not None and target_obj['visible']
-            self._last_to_interact_object_pose = target_obj
-            return dict(action=f"{subtask_action}ByType", objectType=target_obj["objectType"])
+            get_logger().debug(
+                f"Currently trying to [{self.current_subtask_str}] with "
+                f"self._last_to_target_recep_id: {self._last_to_target_recep_id}."
+            )
+            if expert_nav_action is None:
+                get_logger().debug(
+                    f"The agent failed to go to the target receptacle."
+                    f" Returning None."
+                )
+                return None
+            elif expert_nav_action == "Pass":
+                get_logger().debug(
+                    f"The agent arrived to the target receptacle."
+                    f" Returning None."
+                )
+                return None
+            else:
+                get_logger().debug(
+                    f"The agent has not arrived to the target receptacle."
+                    f" Returning dict(action='{expert_nav_action}')."
+                )
+                return dict(action=expert_nav_action)
 
         else:
-            raise NotImplementedError(
-                f"Subtask {subtask_action} is not implemented."
-            )       
-'''
+            get_logger().debug(
+                f"target: {target}"
+            )
+            raise RuntimeError("Invalid subtask...")
+
+    def move_room(self) -> Optional[Dict[str, Any]]:
+        get_logger().debug(
+            f"In `move_room` method"
+        )
+        if not self.current_subtask_str.startswith("MoveTo"):
+            get_logger().debug(
+                f"Current subtask does not start with [MoveTo]. Returning None."
+            )
+            return None
+        target_room_type = self.current_subtask_str.replace("MoveTo", "")
+        target_room_id = self.env.get_room_id_by_type(target_room_type)
+        return self.move_to_target_room(target_room=target_room_id,)
+    
+    def explore(self, standing: bool = True, horizon: int = 30) -> Optional[Dict[str, Any]]:
+        get_logger().debug(
+            f"In `explore` method"
+        )
+        if self.current_subtask_str != "Explore":
+            get_logger().debug(
+                f"Current subtask is not [Explore]. Returning None."
+            )
+            return None
+        
+        found_object = self.env.target_object_id in self.scanned_objects
+        found_receptacle = self.env.target_recep_id in self.scanned_receps
+
+        if not found_receptacle:
+            if self.env.current_room != self.env.target_recep_room_id:
+                get_logger().debug(
+                    f"The agent should explore to find target receptacle "
+                    f"but the current room[{self.env.current_room}] is not the target receptacle room[{self.env.target_recep_room_id}]."
+                    f" Returning None."
+                )
+                return None
+
+            pose_act = self.exploration_pose(horizon=horizon)
+            self._last_to_interact_object_pose = next(
+                o for o in self.env.objects() if o['objectId'] == self.env.target_recep_id
+            )
+
+            assert self.env.target_recep_id in self.cached_locs_for_recep, f"It should be updated!"
+            expert_nav_action = self._expert_nav_action_to_obj(
+                self._last_to_interact_object_pose,
+                force_standing=standing,
+                force_horizon=horizon,
+                recep_target_keys=self.cached_locs_for_recep[self.env.target_recep_id]
+            )
+
+            if expert_nav_action is None:
+                if pose_act is not None:
+                    get_logger().debug(
+                        f"Change to the pose with pose_action[{pose_act}]"
+                    )
+                    return pose_act
+                get_logger().debug(
+                    f"Failed to navigate to {self.env.target_recep_id} in {self.env.current_room}"
+                    f" Returning None."
+                )
+                return None
+            
+            if expert_nav_action != "Pass":
+                return self.pose_action_if_compatible(
+                    nav_action=dict(action=expert_nav_action),
+                    pose_action=pose_act,
+                    current_recep=self._last_to_interact_object_pose,
+                    standing=standing,
+                    horizon=horizon,
+                )
+            
+            if len(self._current_object_target_keys) > 0:
+                self.scanned_receps.add(self.env.target_recep_id)
+                self.unvisited_recep_ids_per_room[self.env.current_room].remove(
+                    self.env.target_recep_id
+                )
+                self.visited_recep_ids_per_room[self.env.current_room].add(self.env.target_recep_id)
+                get_logger().debug(
+                    f"Agent Found the Target Recep 9' 3')9"
+                )
+            
+            return None
+
+        elif not found_object:
+            if self.env.current_room != self.env.target_object_room_id:
+                get_logger().debug(
+                    f"The agent should explore to find target object "
+                    f"but the current room[{self.env.current_room}] is not the target object room[{self.env.target_object_room_id}]."
+                    f" Returning None."
+                )
+                return None
+
+            self._last_to_interact_object_pose = next(
+                o for o in self.env.objects() if o['objectId'] == self.env.target_object_id
+            )
+            target_object_receptacle = None
+            for recep, objs in self.unvisited_object_ids_per_recep.items():
+                if self.env.target_object_id in objs:
+                    target_object_receptacle = recep
+                    break
+            
+            expert_nav_action = self._expert_nav_action_to_obj(
+                self._last_to_interact_object_pose,
+                force_standing=standing,
+                force_horizon=horizon,
+            )
+            
+            if expert_nav_action is None:
+                get_logger().debug(
+                    f"Failed to navigate to {self.env.target_object_id} in {self.env.current_room}."
+                    f" Re-trying navigation."
+                )
+                expert_nav_action = self._expert_nav_action_to_obj(
+                    self._last_to_interact_object_pose,
+                )
+                if expert_nav_action is None:
+                    interactable_positions = self.env._interactable_positions_cache.get(
+                        scene_name=self.env.scene,
+                        obj=self._last_to_interact_object_pose,
+                        controller=self.env,
+                    )
+                    if len(interactable_positions) != 0:
+                        get_logger().debug(
+                            f"Could not find a path to {self._last_to_interact_object_pose['objectId']}"
+                            f" in scene {self.task.env.scene}"
+                            f" when at position {self.task.env.get_agent_location()}."
+                        )
+                    else:
+                        get_logger().debug(
+                            f"Object {self._last_to_interact_object_pose['objectId']} in scene {self.task.env.scene}"
+                            f" has no interactable positions."
+                        )
+                    get_logger().debug(
+                        f"Returning None."
+                    )
+                    return None
+            
+            if expert_nav_action == "Pass":
+                if self.env.target_object_id not in self.visible_objects:
+                    get_logger().debug(
+                        f"target object {self.env.target_object_id} is not visible."
+                        f" Try to invalidate the interactable loc {self.env.get_agent_location()}"
+                        f" for obj_pose [{self._last_to_interact_object_pose}]"
+                    )
+                    if self._invalidate_interactable_loc_for_pose(
+                        location=self.env.get_agent_location(),
+                        obj_pose=self._last_to_interact_object_pose,
+                    ):
+                        get_logger().debug(
+                            f"Invalidated the interactable loc {self.env.get_agent_location()}"
+                            f" for obj_pose [{self._last_to_interact_object_pose}]"
+                        )
+                        return self.explore(standing=standing, horizon=horizon)
+                    
+                    get_logger().debug(
+                        f"Failed to invalidate the loc."
+                    )
+                    
+                    if (
+                        target_object_receptacle is not None
+                        and self.shortest_path_navigator.get_full_key(
+                            self.env.get_agent_location()
+                        ) in self.cached_locs_for_recep[target_object_receptacle]
+                    ):
+                        get_logger().debug(
+                            f"Remove the current location from the cached locs for recep."
+                        )
+                        self.cached_locs_for_recep[target_object_receptacle].remove(
+                            self.shortest_path_navigator.get_full_key(self.env.get_agent_location())
+                        )
+                        get_logger().debug(
+                            f"Explore the target object with removed cached locs."
+                        )
+                        return self.explore(standing=standing, horizon=horizon)
+                    
+                    interactable_positions = self.env._interactable_positions_cache.get(
+                        scene_name=self.env.scene,
+                        obj=self._last_to_interact_object_pose,
+                        controller=self.env,
+                    )
+                    for ip in interactable_positions:
+                        if (
+                            ip["x"] == self.env.get_agent_location()["x"]
+                            and ip["z"] == self.env.get_agent_location()["z"]
+                            and ip["rotation"] == self.env.get_agent_location()["rotation"]
+                        ):
+                            get_logger().debug(
+                                f"Change the standing and horizon constraints at current location"
+                                f" then find out the target object [{ip}]"
+                            )
+                            return self.explore(standing=ip["standing"], horizon=ip["horizon"])
+                    
+                    get_logger().debug(
+                        f"No interactable positions available at the current location... IMPOSSIBLE?!"
+                        f" Returning None."
+                    )
+                    return None
+                
+                get_logger().debug(
+                    f"Agent found the target object {self.env.target_object_id} 9' 3')9"
+                    f" and arrived at the interactable position."
+                )
+                self.unvisited_object_ids_per_recep[target_object_receptacle].remove(self.env.target_object_id)
+                self.scanned_objects.add(self.env.target_object_id)
+                self.visited_object_ids_per_recep[target_object_receptacle].add(self.env.target_object_id)
+
+                get_logger().debug(
+                    f"Returning None."
+                )
+                return None
+            
+            get_logger().debug(
+                f"Returning expert_nav_action: dict(action={expert_nav_action})."
+            )
+            return dict(action=expert_nav_action)
+
+        else:
+            get_logger().debug(
+                f"Target object and target receptacle are both found already."
+                f" No need to explore anymore... Returning None."
+            )
+            return None

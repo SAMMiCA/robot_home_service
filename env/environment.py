@@ -191,7 +191,10 @@ class HomeServiceEnvironment:
         self._house_center: Optional[Dict[str, Any]] = None
         self._current_procthor_scene_name: Optional[str] = None
         self._rooms = None
-        self._target_room_id = None
+        self._target_object_room_id = None
+        self._target_recep_room_id = None
+        self._target_object_id = None
+        self._target_recep_id = None
         self._cached_shortest_paths = {}
         self._house_graph = None
         self._last_room_id = None
@@ -478,6 +481,13 @@ class HomeServiceEnvironment:
         return None
 
     @property
+    def current_room_type(self):
+        if self.current_room is None:
+            return None
+        
+        return self.get_room_type(self.current_room)
+
+    @property
     def house_graph(self):
         if self._house_graph is None:
             graph = nx.Graph()
@@ -489,16 +499,62 @@ class HomeServiceEnvironment:
         return self._house_graph
 
     @property
-    def target_room_id(self):
-        if self._target_room_id is None:
-            house_differences = self.initial_house_differences()
-            assert len(house_differences) == 1
-            self._target_room_id = self.obj_id_with_cond_to_room(
-                self.pickupable_object_condition
-            )[house_differences[0]]
-            rooms_with_differences = []
+    def target_recep_room_id(self):
+        if self._target_recep_room_id is None:
+            self._target_recep_room_id = self.obj_id_with_cond_to_room()[
+                self.target_recep_id
+            ]
+        
+        return self._target_recep_room_id
 
-        return self._target_room_id
+    @property
+    def target_recep_id(self):
+        if self._target_recep_id is None:
+            target_recep_type = self.current_task_spec.target_receptacle
+            def recep_cond(obj: Dict[str, Any]):
+                if obj["objectType"] == target_recep_type:
+                    return True
+                else:
+                    return False
+            target_receps = self.filter_objs(recep_cond)
+            # if len(target_receps) != 1:
+            #     import pdb; pdb.set_trace()
+            # assert len(target_receps) == 1, f"Why it has more than 1 receps?"
+            if len(target_receps) > 1:
+                target_receps = [
+                    recep
+                    for recep in target_receps
+                    if recep['receptacle']
+                ]
+            self._target_recep_id = target_receps[0]["objectId"]
+
+        return self._target_recep_id
+
+    @property
+    def target_object_room_id(self):
+        if self._target_object_room_id is None:
+            self._target_object_room_id = self.obj_id_with_cond_to_room(
+                self.pickupable_object_condition
+            )[self.target_object_id]
+
+        return self._target_object_room_id
+
+    @property
+    def target_object_id(self):
+        if self._target_object_id is None:
+            house_differences = self.initial_house_differences()
+            # assert len(house_differences) == 
+            self._target_object_id = next(
+                o['objectId'] for o in self.objects()
+                if (
+                    o["pickupable"]
+                    # and not o["receptacle"]
+                    and o['objectId'] in house_differences
+                    and o['objectType'] == self.current_task_spec.pickup_object
+                )
+            )
+        
+        return self._target_object_id
 
     '''
     Methods
@@ -861,6 +917,7 @@ class HomeServiceEnvironment:
                 else:
                     # TODO: dropped object is not snapped to the target pose, 
                     # but what if it has dropped to target receptacle
+                    import pdb; pdb.set_trace()
                     return False
 
             # We couldn't teleport the object to the target location, let's try placing it
@@ -878,7 +935,8 @@ class HomeServiceEnvironment:
                     **self.physics_step_kwargs,
                 )
                 if self.controller.last_event.metadata["lastActionSuccess"]:
-                    break
+                    # break
+                    return True
 
             # We failed to place the object into a receptacle, let's just drop it.
             if len(possible_receptacles) == 0 or (
@@ -892,6 +950,7 @@ class HomeServiceEnvironment:
                         randomMagnitude=0.0,
                         **{**self.physics_step_kwargs, "actionSimulationSeconds": 1.5},
                     )
+                    return self.controller.last_event.metadata["lastActionSuccess"]
                 except:
                     get_logger().debug(
                         "'DropHeldObjectAhead' failed, using 'DropHandObject'"
@@ -899,6 +958,7 @@ class HomeServiceEnvironment:
                     self.controller.step(
                         action="DropHandObject", forceAction=True,
                     )
+                    return self.controller.last_event.metadata["lastActionSuccess"]
 
             return False
 
@@ -1047,6 +1107,16 @@ class HomeServiceEnvironment:
                 door["openness"] = 0
         return house
 
+    def get_room_type(self, room_id: str):
+        for room in self.current_house['rooms']:
+            if room['id'] == room_id:
+                return room['roomType']
+
+    def get_room_id_by_type(self, room_type: str):
+        for room in self.current_house["rooms"]:
+            if room["roomType"] == room_type:
+                return room["id"]
+
     def procthor_reset(
         self,
         scene_name,
@@ -1104,7 +1174,10 @@ class HomeServiceEnvironment:
             self._cached_shortest_paths = {}
             self._house_graph = None
 
-        self._target_room_id = None
+        self._target_recep_id = None
+        self._target_recep_room_id = None
+        self._target_object_id = None
+        self._target_object_room_id = None
 
         return success
 
@@ -1244,6 +1317,19 @@ class HomeServiceEnvironment:
                     forceAction=True,
                     **self.physics_step_kwargs,
                 )
+
+            target_recep = next(o for o in self.objects() if o["objectId"] == self.target_recep_id)
+            assert target_recep["receptacle"], f"Target Receptacle should be RECEPTACLE!!"
+            if target_recep["openable"] and target_recep["openness"] < 1.0:
+                self.controller.step(
+                    action="OpenObject",
+                    objectId=self.target_recep_id,
+                    # openness=obj["target_openness"],
+                    openness=1.0,
+                    forceAction=True,
+                    **self.physics_step_kwargs,
+                )
+                assert self.controller.last_event.metadata["lastActionSuccess"]
             # if raise_on_inconsistency and len(self.current_task_spec.objs_to_open) > 0:
             #     ret_val = self.openness_inconsistency(openness_spec_list=task_spec.objs_to_open)
             #     if ret_val is not None:
@@ -1662,7 +1748,7 @@ class HomeServiceEnvironment:
         # remove all subsequences for rooms not pending
         return self.remove_completed_subpaths(short_path, rooms_pending)
 
-    def shortest_path_to_target_room(self, from_room=None):
+    def shortest_path_to_target_room(self, to_room, from_room=None):
         if from_room is None:
             if self.current_room is None:
                 return None
@@ -1671,12 +1757,17 @@ class HomeServiceEnvironment:
         if len(self.room_to_poly) < 2:
             return [from_room]
 
+        if to_room == from_room:
+            return [from_room]
+
         if from_room not in self._cached_shortest_paths:
-            self._cached_shortest_paths[from_room] = nx.shortest_path(
-                self.house_graph, source=from_room, target=self.target_room_id
+            self._cached_shortest_paths[from_room] = {}
+        if to_room not in self._cached_shortest_paths[from_room]:
+            self._cached_shortest_paths[from_room][to_room] = nx.shortest_path(
+                self.house_graph, source=from_room, target=to_room,
             )
 
-        return self._cached_shortest_paths[from_room]
+        return self._cached_shortest_paths[from_room][to_room]
 
     def initial_room_differences(self, room_id=None):
         initial_poses, goal_poses, _ = self.filtered_poses(room_id or self.current_room)

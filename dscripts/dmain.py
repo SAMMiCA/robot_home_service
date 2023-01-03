@@ -8,7 +8,6 @@ import subprocess
 import sys
 import time
 import re
-import socket
 from pathlib import Path
 from typing import Optional
 
@@ -17,8 +16,8 @@ sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(Path(__file__)))
 
 from allenact.main import get_argument_parser as get_main_arg_parser
 from allenact.utils.system import init_logging, get_logger, find_free_port
-from scripts.sshutils import read_openssh_config
 from home_service_constants import ABS_PATH_OF_HOME_SERVICE_TOP_LEVEL_DIR
+from dscripts.sshutils import read_openssh_config
 
 
 def get_argument_parser():
@@ -32,6 +31,12 @@ def get_argument_parser():
         required=True,
         type=str,
         help="Comma-separated IP addresses of machines",
+    )
+
+    parser.add_argument(
+        "--master",
+        type=str,
+        default="mil",
     )
 
     parser.add_argument(
@@ -51,11 +56,11 @@ def get_argument_parser():
     )
 
     parser.add_argument(
-        "--rearrange2022_path",
+        "--home_service_path",
         required=False,
         type=str,
-        default="rearrange2022",
-        help="Path to allenact top directory. It must be the same across all machines",
+        default="robot_home_service",
+        help="Path to home_service top directory. It must be the same across all machines",
     )
 
     # Required distributed_ip_and_port
@@ -94,9 +99,10 @@ def get_raw_args():
             "--runs_on",
             "--ssh_cmd",
             "--conda_env",
-            "--rearrange2022_path",
+            "--home_service_path",
             "--extra_tag",
             "--machine_id",
+            "--master",
         ]:
             remove = arg
         elif arg == "--config_kwargs":
@@ -127,26 +133,13 @@ def id_generator(size=4, chars=string.ascii_uppercase + string.digits):
     return "".join(random.choice(chars) for _ in range(size))
 
 
-def extract_ip():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    try:
-        sock.connect(("10.255.255.255", 1))
-        ip = sock.getsockname()[0]
-    except:
-        ip = "127.0.0.1"
-    finally:
-        sock.close()
-    
-    return ip
-
 # Assume we can ssh into each of the `runs_on` machines through port 22
 if __name__ == "__main__":
     # Tool must be called from Rearrange2022 project's root directory
     cwd = os.path.abspath(os.getcwd())
-    assert cwd == ABS_PATH_OF_REARRANGE_TOP_LEVEL_DIR, (
+    assert cwd == ABS_PATH_OF_HOME_SERVICE_TOP_LEVEL_DIR, (
         f"`dmain.py` called from {cwd}."
-        f"\nIt should be called from Rearrange2022's top level directory {ABS_PATH_OF_REARRANGE_TOP_LEVEL_DIR}."
+        f"\nIt should be called from Rearrange2022's top level directory {ABS_PATH_OF_HOME_SERVICE_TOP_LEVEL_DIR}."
     )
 
     args = get_args()
@@ -167,23 +160,6 @@ if __name__ == "__main__":
         f"Missing listener IP address {args.distributed_ip_and_port.split(':')[0]}"
         f" in list of worker addresses {all_addresses}"
     )
-    
-    ip_regex = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}.\d{1,3}')
-    if re.match(ip_regex, args.distributed_ip_and_port.split(":")[0]):
-        distributed_ip = args.distributed_ip_and_port.split(":")[0]
-    else:
-        distributed_ip, _, _, _ = read_openssh_config(args.distributed_ip_and_port.split(":")[0])
-        assert re.match(ip_regex, distributed_ip)
-    if int(args.distributed_ip_and_port.split(":")[1]) == 0:
-        manager_node_ip = extract_ip()
-        assert distributed_ip == manager_node_ip, (
-            f"Distributed_ip {distributed_ip} should be same with manager_node_ip {manager_node_ip}"
-        )
-        distributed_port = find_free_port(distributed_ip)
-    else:
-        distributed_port = args.distributed_ip_and_port.split(":")[1]
-    idx = raw_args.index('--distributed_ip_and_port')
-    raw_args[idx + 1] = f'{distributed_ip}:{distributed_port}'
 
     time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(time.time()))
 
@@ -197,9 +173,34 @@ if __name__ == "__main__":
 
     with open(killfilename, "w") as killfile:
         for it, addr in enumerate(all_addresses):
-            code_tget = f"{addr}:{args.rearrange2022_path}/"
-            get_logger().info(f"rsync {code_src} to {code_tget}")
-            os.system(f"rsync -rz {code_src} {code_tget} --exclude '__pycache__' --exclude '{args.output_dir}'")
+            ip_regex = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}.\d{1,3}')
+            if re.match(ip_regex, args.distributed_ip_and_port.split(":")[0]):
+                distributed_ip = args.distributed_ip_and_port.split(":")[0]
+            else:
+                if addr != args.master:
+                    distributed_ip, _, _, _ = read_openssh_config(args.distributed_ip_and_port.split(":")[0])
+                else:
+                    distributed_ip = "127.0.0.1"
+
+            if (
+                len(args.distributed_ip_and_port.split(":")) == 1
+                or len(args.distributed_ip_and_port.split(":")[1]) == 0
+                or int(args.distributed_ip_and_port.split(":")[1]) == 0
+            ):
+                distributed_port = find_free_port()
+            else:
+                if addr != args.master:
+                    distributed_port = int(args.distributed_ip_and_port.split(":")[1])
+                else:
+                    distributed_port = 5000
+            
+            idx = raw_args.index('--distributed_ip_and_port')
+            raw_args[idx+1] = f"{distributed_ip}:{distributed_port}"
+
+            if addr != args.master:
+                code_tget = f"{addr}:{args.home_service_path}/"
+                get_logger().info(f"rsync {code_src} to {code_tget}")
+                os.system(f"rsync -rz {code_src} {code_tget} --exclude '__pycache__' --exclude '{args.output_dir}'")
 
             job_id = id_generator()
 
@@ -220,9 +221,10 @@ if __name__ == "__main__":
             env_and_command = wrap_single_nested(
                 f"for NCCL_SOCKET_IFNAME in $(route | grep default) ; do : ; done && export NCCL_SOCKET_IFNAME"
                 f" && export NCCL_P2P_DISABLE=1"
-                f" && cd {args.rearrange2022_path}"
+                f" && cd {args.home_service_path}"
                 f" && export PYTHONPATH=$PYTHONPATH:$PWD"
                 f" && mkdir -p {args.output_dir}"
+                f" && conda_base"
                 f" && conda activate {args.conda_env} &>> {logfile}"
                 f" && echo pwd=$(pwd) &>> {logfile}"
                 f" && echo output_dir={args.output_dir} &>> {logfile}"

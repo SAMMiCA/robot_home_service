@@ -89,12 +89,12 @@ if __name__ == "__main__":
             .replace("-f", args.config_script)
             .format(addr=addr)
         )
-        print(f"SCP command {scp_cmd}:~/research/{remote_config_script}")
-        os.system(f"{scp_cmd}:~/research/{remote_config_script}")
+        print(f"SCP command {scp_cmd}:~/research/robot_home_service/scripts/{remote_config_script}")
+        os.system(f"{scp_cmd}:~/research/robot_home_service/scripts/{remote_config_script}")
 
         tmux_name = f"allenact_config_machine{it}"
         bash_command = wrap_single_nested(
-            f"source ~/research/{remote_config_script} &>> log_allenact_distributed_config"
+            f"source ~/research/robot_home_service/scripts/{remote_config_script} &>> log_allenact_distributed_config"
         )
         # tmux_command = wrap_single(
         #     f"tmux new-session -d -s {tmux_name} && tmux send-keys -t {tmux_name} {bash_command} C-m"
